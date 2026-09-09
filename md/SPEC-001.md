@@ -1,11 +1,11 @@
 # SPEC-001 — Invariant-Compiled Consistency
 
-**Status:** Draft 0.2 — proposed architecture; implementation, qualification and research proof remain open  
-**Date:** 2026-09-09  
-**Type:** Foundational architecture specification  
-**Scope:** observable contracts, conservative compilation, protocol composition, authority, evolution and qualification  
-**Reference implementation:** Rust stable; conceptual records do not freeze a Rust or wire ABI  
-**Project:** CarolinaDB; earlier research documents and canonical hash domains retain the historical `astra` name  
+**Status:** Draft 0.2 — proposed architecture; implementation, qualification and research proof remain open
+**Date:** 2026-09-09
+**Type:** Foundational architecture specification
+**Scope:** observable contracts, conservative compilation, protocol composition, authority, evolution and qualification
+**Reference implementation:** Rust stable; conceptual records do not freeze a Rust or wire ABI
+**Project:** CarolinaDB; earlier research documents and canonical hash domains retain the historical `astra` name
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY express requirements, not implemented capabilities.
 
 ## 0. Thesis

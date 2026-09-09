@@ -1,12 +1,12 @@
 # SPEC-006 — Escrow Runtime
 
-**Subtitle:** Bounded Resources, Exclusive Rights, Transfers and Recovery  
-**Status:** Draft 0.2 — proposed protocol; proof and implementation are pending  
-**Date:** 2026-09-09  
-**Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md), [SPEC-005](SPEC-005.md)  
-**Integrates with:** [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)  
-**Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog and typed authority), [SPEC-012](SPEC-012.md) (request identity and codecs), [SPEC-013](SPEC-013.md) (security and trust)  
-**Reference implementation:** Rust stable; initially an `astra-runtime` module  
+**Subtitle:** Bounded Resources, Exclusive Rights, Transfers and Recovery
+**Status:** Draft 0.2 — proposed protocol; proof and implementation are pending
+**Date:** 2026-09-09
+**Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md), [SPEC-005](SPEC-005.md)
+**Integrates with:** [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)
+**Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog and typed authority), [SPEC-012](SPEC-012.md) (request identity and codecs), [SPEC-013](SPEC-013.md) (security and trust)
+**Reference implementation:** Rust stable; initially an `astra-runtime` module
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY define requirements of this draft.
 
 ## 1. Decision

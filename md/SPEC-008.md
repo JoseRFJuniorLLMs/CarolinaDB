@@ -1,14 +1,14 @@
 # SPEC-008 — Serial IDC Runtime
 
-**Subtitle:** Ordered Execution, Distributed Decisions and Atomic Publication  
-**Status:** Draft 0.2 — proposed implementation contract; not an implemented or proven protocol  
-**Date:** 2026-09-09  
-**Type:** Distributed runtime specification  
-**Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md)  
-**Protocol interfaces:** [SPEC-005](SPEC-005.md), [SPEC-006](SPEC-006.md), [SPEC-007](SPEC-007.md), [SPEC-009](SPEC-009.md)  
-**Qualification:** [SPEC-010](SPEC-010.md)  
-**Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog and typed authority), [SPEC-012](SPEC-012.md) (request identity, receipts and codecs), [SPEC-013](SPEC-013.md) (security and trust)  
-**Reference implementation:** Rust stable; consensus and sequencing outside `astra-storage`  
+**Subtitle:** Ordered Execution, Distributed Decisions and Atomic Publication
+**Status:** Draft 0.2 — proposed implementation contract; not an implemented or proven protocol
+**Date:** 2026-09-09
+**Type:** Distributed runtime specification
+**Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md)
+**Protocol interfaces:** [SPEC-005](SPEC-005.md), [SPEC-006](SPEC-006.md), [SPEC-007](SPEC-007.md), [SPEC-009](SPEC-009.md)
+**Qualification:** [SPEC-010](SPEC-010.md)
+**Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog and typed authority), [SPEC-012](SPEC-012.md) (request identity, receipts and codecs), [SPEC-013](SPEC-013.md) (security and trust)
+**Reference implementation:** Rust stable; consensus and sequencing outside `astra-storage`
 **Normative terms:** MUST, MUST NOT, SHOULD, SHOULD NOT and MAY express requirements on a conforming implementation.
 
 ---

@@ -1,9 +1,10 @@
 # SPEC-010 — Qualification
 
-**Status:** Draft qualification specification; no test or benchmark results are claimed.  
-**Date:** 2026-09-09  
-**Depends on:** [SPEC-001](SPEC-001.md)–[SPEC-009](SPEC-009.md).  
-**Primary requirements:** SPEC-001 §§64–75 and 80–92; SPEC-002 §§127–179.  
+**Status:** Draft 0.2 qualification specification; no test, model-checking or benchmark results are claimed.
+**Date:** 2026-09-09
+**Depends on:** [SPEC-001](SPEC-001.md)–[SPEC-009](SPEC-009.md).
+**Infrastructure contracts:** [SPEC-011](SPEC-011.md), [SPEC-012](SPEC-012.md), [SPEC-013](SPEC-013.md); staged execution in [SPEC-014](SPEC-014.md).
+**Primary requirements:** SPEC-001 §§64–75 and 80–92; SPEC-002 §§127–179.
 **Research requirements:** [consistency-prior-art](../research/consistency-prior-art.md), experiments E1–E5, and [PROPOSTA-DE-PESQUISA](../PROPOSTA-DE-PESQUISA.md) §1.
 
 ## 1. Purpose
@@ -31,7 +32,9 @@ QualificationManifest {
   storage_format_versions, compiler_rule_versions, protocol_versions
   supported_contract_fragment, enabled_features
   operation_definitions, schema_hashes, plan_hashes
-  durability_profiles, failure_assumptions
+  client_durability_profiles, authority_durability_policies, transfer_decision_durability_policies
+  failure_assumptions, formal_model_refs, formal_bounds, refinement_mapping_refs
+  catalog_capabilities, identity_codec_manifest, security_profile
   topology, authority_configuration, placement
   resource_limits, timeout_and_retry_policy
   seed_set, schedules, checker_versions, run_budget
@@ -223,6 +226,11 @@ The first system campaign uses three isolated node processes and separate data d
 | Q-F15 | Clock jumps far forward/backward | No extra authority from timeout or lease assumptions absent from the contract |
 | Q-F16 | Close/catalog/activation crashes at each durable boundary | At most one incompatible admitting generation |
 | Q-F17 | Restore snapshot at different physical versions/placement | Same semantic identities and commitments; local versions not globally compared |
+| Q-F18 | Two gateways race RequestKey allocation, crash RequestHome and move its route | One original TxnId/hash binding and no reexecution; unresolved authority blocks replacement |
+| Q-F19 | G1 session token used in G2, or migration splits a group | Explicit scope error or qualified composite translation; no silently lost dependency |
+| Q-F20 | LocalStable client profile but replicated transfer-decision policy; lose donor disk | Policy witnesses gate every required step; irrecoverable evidence freezes uncertain rights |
+| Q-F21 | Stale catalog grant, concurrent overlapping CAS, forged peer or downgrade transcript | No unauthorized admission; typed refusal without effects |
+| Q-F22 | Wire/receipt/snapshot corruption, codec rollback and namespace tombstone GC | Bounded fail-closed decoding and no historical request resurrection |
 
 Partition tests include asymmetric links, majority/minority components, isolated rights holders, and a client connected to a stale gateway. Healing requires eventual delivery/recovery assumptions; record backlog limits and replay completion.
 
@@ -370,7 +378,17 @@ The runner returns distinct process exit codes for pass, failure, inconclusive a
 
 ## 16. Formal model targets
 
-Minimum models cover escrow conservation/transfer, local durability barriers, prepare/decision/publication, C4 validation reservations, C5 authority failover, and plan close/drain/activate. Each model states initial conditions, transitions, invariants, fairness assumptions and explored bounds.
+TLA+ or an equivalent explicit state-machine model checker is mandatory for each enabled distributed feature below. Models state initial conditions, transitions, invariants, fairness assumptions, failure/durability profiles and explored bounds. Local durability-barrier models remain additional targets; simulation alone is not a substitute for these gates.
+
+| Gate | Required model scope | Claims it blocks until passed |
+| --- | --- | --- |
+| FM-1 — Escrow transfer/authority | Conservation; prepare/unique commit-or-abort/install; duplicate/lost messages; donor/receiver crash; allocation versus holder epochs; independent authority/transfer durability and permanent evidence loss | C3 distributed safety and holder/rights failover |
+| FM-2 — Decision/publication | C5 decision authority and failover; multi-IDC prepare/decision/install/publication/completion; retained read gates; C4 validation/reservations when enabled | C5 distributed correctness; composition and any C4 correctness claim |
+| FM-3 — Evolution/fencing | Catalog CAS and overlapping scope exclusion; close/drain/install/activate; concurrent coordinators; RequestHome mapping/handoff; old tokens, namespaces and authority after GC/restore | Distributed plan/authority/home migration and evolution claims |
+
+For an enabled feature, the release condition is `applicable model checks PASS AND deterministic simulator PASS AND real-process fault campaign PASS`. Missing models, skipped checks, exhausted bounds without a completed verdict, or lost evidence yield NOT_RUN/INCONCLUSIVE and do not pass. A disabled feature may record NOT_APPLICABLE with its capability disabled. Single-IDC C5 first qualifies its applicable FM-2 subset; enabling composite publication or C4 expands and reruns the model rather than claiming the subset covered it.
+
+Each gate retains model source/hash, checker/tool version, exact configuration, state counts, bounds, invariants, liveness assumptions, result logs and negative-control counterexamples. Changing a protocol, authority/durability policy or optimization invalidates affected model evidence. A finite completed exploration is bounded evidence, not a proof of the unbounded protocol or the Rust implementation.
 
 Link implementation events to model transitions. If implementation introduces an optimization absent from the model, either show a refinement mapping or disable that optimization for the claim. Model checking is evidence within bounds; an unrestricted proof is a separate deliverable.
 
@@ -383,15 +401,16 @@ Negative controls are mandatory: deliberately remove donor fencing, skip range v
 | Q0 — Formal core | SPEC-003/004 | Golden IR corpus, deterministic artifacts, explicit unknown/reject behavior, reference evaluator |
 | Q1 — Local durability | SPEC-002 S0–S6 | P1–P8 campaigns and storage/journal verifiers pass for supported formats |
 | Q2 — Local prepared/metadata | SPEC-002 S7–S8 | P9/P10 and atomic business/protocol/result persistence pass |
-| Q3 — Initial protocols | SPEC-005/006/008 single-IDC | C1/C2/C3/C5 fault acceptance and recovery pass; capabilities explicitly scoped |
-| Q4 — Composition | SPEC-008 multi-IDC and SPEC-004 composition | Mixed workloads, authority interaction and atomic read/finality checks pass |
-| Q5 — Evolution | SPEC-009 | EV-01–EV-14 pass on enabled features with real-process and deterministic evidence |
-| Q6 — Optional certification | SPEC-007 | Key/range/predicate validation and durable reservations qualified with Q4/Q5 rerun where affected |
+| QI — Infrastructure | SPEC-011/012/013 | Catalog/identity/codec/security acceptance cases pass for enabled capabilities; no empty/fabricated compatibility corpus |
+| Q3 — Initial protocols | QI; SPEC-005/006/008 single-IDC | C1/C2/C3/C5 fault acceptance and recovery pass by enabled slice; FM-1 for C3 and applicable FM-2 for C5 |
+| Q4 — Composition | SPEC-008 multi-IDC and SPEC-004 composition | FM-2 decision/publication plus mixed workloads, authority interaction and atomic read/finality checks pass |
+| Q5 — Evolution | SPEC-009/011/012 | FM-3 and EV-01–EV-16 pass on enabled features with real-process and deterministic evidence |
+| Q6 — Optional certification | SPEC-007 | FM-2 includes certification; key/range/predicate validation and durable reservations qualified with Q4/Q5 rerun where affected |
 | Q7 — Evaluation | Prior relevant gates | E1–E5 report, pinned baselines, equivalent guarantees, failures and limitations published |
 
 A feature is disabled until its applicable gates pass; C4 can remain disabled while the initial prototype progresses. Each gate stores explicit test IDs and evidence references. After a code change, rerun affected checks and required integration gates; repeat unrelated campaigns only when dependency changes or failures justify them.
 
-This is research-prototype qualification. Production authentication, authorization, encryption, tenant isolation, operational backup/restore policy, service packaging and compatibility support require later specifications and evidence. Absence of these capabilities must not be hidden behind a passing protocol suite.
+This is research-prototype qualification. SPEC-011–013 now own catalog, authentication/authorization, tenant isolation, protection profiles, backup/restore and compatibility contracts; their existence is not implementation evidence. QI is evaluated per capability in SPEC-014: local parser/storage work does not need a deployed catalog, but distributed execution requires the applicable catalog/trust/codec evidence first. Production packaging and every advertised security/operational capability need their own evidence. A plaintext isolated-test profile is never an encrypted production qualification.
 
 ## 18. Acceptance of the qualification system
 
@@ -407,8 +426,11 @@ This is research-prototype qualification. Production authentication, authorizati
 | QA-08 | Result invariant passes but an earlier final reservation is erased | Observable-history checker fails |
 | QA-09 | Client queues under overload | End-to-end latency includes queue/retry/wait time |
 | QA-10 | Fault target points outside allowlisted test environment | Runner rejects before mutation |
+| QA-11 | Simulator and real-process campaigns pass but applicable FM model is missing | NOT_RUN; distributed correctness gate remains closed |
+| QA-12 | Model exploration finds no violation only within a finite bound | Report that bound; no unbounded proof or implementation-proof claim |
+| QA-13 | C3 result durability differs from transfer/authority durability | Manifest/equivalence checks preserve all three profiles and required witnesses |
 
-Acceptance tables in SPEC-003–009 and storage scenarios SPEC-002 §§173–179 are inputs to the campaign registry. Their presence in Markdown is not evidence they have run.
+Acceptance tables in SPEC-003–009 and SPEC-011–013 and storage scenarios SPEC-002 §§173–179 are inputs to the campaign registry. Their presence in Markdown is not evidence they have run.
 
 ## 19. Deliverables and traceability
 
@@ -422,6 +444,7 @@ Deliver the reference interpreter, simulator adapters, crash runner, distributed
 | SPEC-005/006 | Delivery/causality, rights accounting, dedupe, authority recovery |
 | SPEC-007/008 | Certification, consensus, distributed decision and atomic observation |
 | SPEC-009 | Preserved receipts and authority across generation transitions |
+| SPEC-011/012/013 | Catalog CAS/fences; request identity and codec/snapshot corpus; authenticated admission, rotation/revocation and tenant isolation |
 | Research E1–E5 | Useful fragment, honest comparisons, composition and storage necessity |
 
 The final campaign report leads with supported capabilities and remaining failures/unknowns, then states exact guarantees, tested failure bounds, evidence, performance and limitations. It must be possible to reproduce a verdict without trusting the prose claim that the database is correct.

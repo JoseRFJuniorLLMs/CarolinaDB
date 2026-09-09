@@ -1,13 +1,13 @@
 # SPEC-004 — Coordination Compiler
 
-**Status:** Draft 0.2 — proposed implementation contract; rule soundness and runtime qualification pending  
-**Date:** 2026-09-09  
-**Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md)  
-**Execution targets:** [SPEC-005](SPEC-005.md), [SPEC-006](SPEC-006.md), [SPEC-007](SPEC-007.md), [SPEC-008](SPEC-008.md)  
-**Evolution and qualification:** [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)  
-**Catalog, identity and security:** [SPEC-011](SPEC-011.md), [SPEC-012](SPEC-012.md), [SPEC-013](SPEC-013.md)  
-**Scope:** protocol derivation, semantic dependencies, candidate safety, plan certificates, fallback and executable plan obligations  
-**Reference implementation:** Rust stable; conceptual records are not a frozen ABI  
+**Status:** Draft 0.2 — proposed implementation contract; rule soundness and runtime qualification pending
+**Date:** 2026-09-09
+**Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md)
+**Execution targets:** [SPEC-005](SPEC-005.md), [SPEC-006](SPEC-006.md), [SPEC-007](SPEC-007.md), [SPEC-008](SPEC-008.md)
+**Evolution and qualification:** [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)
+**Catalog, identity and security:** [SPEC-011](SPEC-011.md), [SPEC-012](SPEC-012.md), [SPEC-013](SPEC-013.md)
+**Scope:** protocol derivation, semantic dependencies, candidate safety, plan certificates, fallback and executable plan obligations
+**Reference implementation:** Rust stable; conceptual records are not a frozen ABI
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY express requirements.
 
 ## 1. Decision and authoritative interpretation
@@ -274,6 +274,7 @@ If dynamic arguments expand the participant set beyond the compiled selector, ex
 ```text
 OperationPlan {
   plan_format_version: u32,
+  plan_id: PlanId,
   operation: OperationRef,
   operation_hash: Hash, schema_hash: Hash, contract_hash: Hash,
   invariant_set_hash: Hash, module_hash: Hash,

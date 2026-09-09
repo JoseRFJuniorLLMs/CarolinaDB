@@ -1,12 +1,12 @@
 # SPEC-002 — Astra Storage Kernel
 
-**Subtitle:** Page Store, MVCC, Commit Journal, Atomic Batches and Crash Recovery  
-**Status:** Draft 0.2 — proposed boundary; formats and runtime qualification pending  
-**Type:** Foundational implementation specification  
-**Depends on:** `SPEC-001 — Invariant-Compiled Consistency`  
-**Shared contracts:** [SPEC-011](SPEC-011.md) identities/catalog; [SPEC-012](SPEC-012.md) request/receipt/encoding; [SPEC-013](SPEC-013.md) trust profiles  
-**Reference implementation:** Rust stable  
-**Scope:** local storage kernel and durable boundary consumed by the distributed consistency runtime  
+**Subtitle:** Page Store, MVCC, Commit Journal, Atomic Batches and Crash Recovery
+**Status:** Draft 0.2 — proposed boundary; formats and runtime qualification pending
+**Type:** Foundational implementation specification
+**Depends on:** `SPEC-001 — Invariant-Compiled Consistency`
+**Shared contracts:** [SPEC-011](SPEC-011.md) identities/catalog; [SPEC-012](SPEC-012.md) request/receipt/encoding; [SPEC-013](SPEC-013.md) trust profiles
+**Reference implementation:** Rust stable
+**Scope:** local storage kernel and durable boundary consumed by the distributed consistency runtime
 **Out of scope:** protocol synthesis, C0–C5 selection, global routing, Raft, SQL optimizer, vector/graph/AI features
 
 ---
@@ -804,7 +804,7 @@ pub struct CompiledBatch {
 }
 ```
 
-`PlanRef` binds `PlanGeneration` and `PlanHash`. `IdcBinding` binds `IdcId`, `IdcGeneration` and `IdcAuthorityEpoch`; the vector is canonical, sorted and duplicate-free. `OriginId` is assigned at origin commit and preserved on replay; prepare may precede its allocation. `semantic_evidence` references recoverable typed causal, authority, reservation or serial records; a digest of unavailable evidence is insufficient. Captured inputs include the accepted reads/operands needed for deterministic result recovery; mutable current state cannot substitute for them.
+`PlanRef` binds `PlanId`, `PlanGeneration` and `PlanHash`. `IdcBinding` binds `IdcId`, `IdcGeneration` and `IdcAuthorityEpoch`; the vector is canonical, sorted and duplicate-free. `OriginId` is assigned at origin commit and preserved on replay; prepare may precede its allocation. `semantic_evidence` references recoverable typed causal, authority, reservation or serial records; a digest of unavailable evidence is insufficient. Captured inputs include the accepted reads/operands needed for deterministic result recovery; mutable current state cannot substitute for them.
 
 `terminal_outcome: None` is permitted for prepare or participant-local installation before the whole invocation is final. A locally final operation requires a terminal record atomically with its effects. A composite participant instead persists its prepared digest, accepted result material and unique decision reference; SPEC-008 requires publication/completion evidence before RequestHome installs the terminal receipt. Recovery must produce byte-identical result material without reevaluation. Client success MUST NOT be inferred from a participant's local `COMMITTED` state.
 
@@ -834,7 +834,7 @@ pub struct TxnStatusTransition {
 }
 pub struct TxnStatusRecord {
     pub revision: RecordRevision,
-    pub phase: BoundOrAdmittedOrPreparedOrInstalledOrAbortedOrTerminal,
+    pub phase: TxnPhase,
     pub plan: PlanRef,
     pub idc_bindings: Vec<IdcBinding>,
     pub prepared_digest: Option<SemanticDigest>,
@@ -842,6 +842,7 @@ pub struct TxnStatusRecord {
     pub accepted_result: Option<CanonicalBytes>,
     pub terminal_outcome: Option<TerminalOutcome>,
 }
+pub enum TxnPhase { Bound, Admitted, Prepared, Installed, Aborted, Terminal }
 pub enum TerminalOutcome {
     Committed(FinalReceiptV1),
     Rejected(FinalReceiptV1),
@@ -3102,22 +3103,22 @@ RocksDB, SQLite and PostgreSQL are valid baselines and test references. They are
 
 # References
 
-1. FoundationDB — Architecture  
+1. FoundationDB — Architecture
    https://apple.github.io/foundationdb/architecture.html
 
-2. FoundationDB — Storage configuration / Redwood and RocksDB engines  
+2. FoundationDB — Storage configuration / Redwood and RocksDB engines
    https://apple.github.io/foundationdb/configuration.html
 
-3. Viktor Leis et al. — **LeanStore: In-Memory Data Management Beyond Main Memory**  
+3. Viktor Leis et al. — **LeanStore: In-Memory Data Management Beyond Main Memory**
    https://db.in.tum.de/~leis/papers/leanstore.pdf
 
-4. Umbra Database System  
+4. Umbra Database System
    https://umbra.db.in.tum.de/
 
-5. Peter Bailis et al. — **Coordination Avoidance in Database Systems**  
+5. Peter Bailis et al. — **Coordination Avoidance in Database Systems**
    https://www.vldb.org/pvldb/vol8/p185-bailis.pdf
 
-6. Jonathan Arns et al. — **Event Horizon: Asymmetric Dependencies for Fast Geo-Distributed Operations**, CIDR 2026  
+6. Jonathan Arns et al. — **Event Horizon: Asymmetric Dependencies for Fast Geo-Distributed Operations**, CIDR 2026
    https://www.vldb.org/cidrdb/2026/event-horizon-asymmetric-dependencies-for-fast-geo-distributed-operations.html
 
 ---

@@ -1,12 +1,12 @@
 # SPEC-003 — Invariant & Effect IR
 
-**Status:** Draft 0.2 — proposed implementation contract; not implemented or proven  
-**Date:** 2026-09-09  
-**Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md)  
-**Consumed by:** [SPEC-004](SPEC-004.md); runtime SPECs 005–008; plan evolution in [SPEC-009](SPEC-009.md)  
-**Identity and protocol owners:** [SPEC-011](SPEC-011.md), [SPEC-012](SPEC-012.md), [SPEC-013](SPEC-013.md)  
-**Scope:** restricted DSL, typed AST, deterministic contract IR, effects, footprints, dependency hypergraph and proof obligations  
-**Reference implementation:** Rust stable; conceptual types below do not freeze a Rust or network ABI  
+**Status:** Draft 0.2 — proposed implementation contract; not implemented or proven
+**Date:** 2026-09-09
+**Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md)
+**Consumed by:** [SPEC-004](SPEC-004.md); runtime SPECs 005–008; plan evolution in [SPEC-009](SPEC-009.md)
+**Identity and protocol owners:** [SPEC-011](SPEC-011.md), [SPEC-012](SPEC-012.md), [SPEC-013](SPEC-013.md)
+**Scope:** restricted DSL, typed AST, deterministic contract IR, effects, footprints, dependency hypergraph and proof obligations
+**Reference implementation:** Rust stable; conceptual types below do not freeze a Rust or network ABI
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY express requirements.
 
 ## 1. Decision and authority

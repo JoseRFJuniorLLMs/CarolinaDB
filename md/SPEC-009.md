@@ -1,9 +1,10 @@
 # SPEC-009 — Plan Evolution
 
-**Status:** Draft specification; implementation and proof obligations remain open.  
-**Date:** 2026-09-09  
-**Depends on:** [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md), and the runtime contracts in [SPEC-005](SPEC-005.md)–[SPEC-008](SPEC-008.md).  
-**Storage boundary:** [SPEC-002](SPEC-002.md), especially §§44, 59–71, 100–109.  
+**Status:** Draft 0.2; implementation and proof obligations remain open.
+**Date:** 2026-09-09
+**Depends on:** [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md), and the runtime contracts in [SPEC-005](SPEC-005.md)–[SPEC-008](SPEC-008.md).
+**Storage boundary:** [SPEC-002](SPEC-002.md), especially §§44, 59–71, 100–109.
+**Catalog, client and trust owners:** [SPEC-011](SPEC-011.md), [SPEC-012](SPEC-012.md), [SPEC-013](SPEC-013.md).
 **Research source:** [PROPOSTA-DE-PESQUISA](../PROPOSTA-DE-PESQUISA.md) §1 and [consistency-prior-art](../research/consistency-prior-art.md).
 
 ## 1. Purpose and normative scope
@@ -18,7 +19,7 @@ This refines [SPEC-001](SPEC-001.md) §§39–43: a change labelled `C3 -> C5` i
 
 ## 2. Failure and authority assumptions
 
-Assume non-Byzantine processes, delayed/duplicated/reordered/lost messages, partitions, crash/recovery, and the durable storage guarantees of SPEC-002. The catalog uses an ordered replicated control plane. A successful catalog write meets its configured durable quorum requirement.
+Assume non-Byzantine processes, delayed/duplicated/reordered/lost messages, partitions, crash/recovery, and the durable storage guarantees of SPEC-002. SPEC-011 owns the ordered replicated control plane, authoritative read barriers, atomic catalog CAS, scope locks, authority grants and activation registry. A successful catalog write meets its configured durable quorum requirement. SPEC-013 defines caller/node authentication; these crash-fault assumptions do not imply tolerance of a malicious consensus member.
 
 Wall-clock time MUST NOT establish revocation in the baseline. There is no bounded-clock lease assumption. A disconnected holder authorized to confirm locally may continue under the old contract until it durably closes that authority. Its migration therefore blocks until the holder is reconciled. An unreachable holder is not an empty holder.
 
@@ -31,37 +32,27 @@ These identifiers have different scopes and MUST NOT be substituted:
 | Identity | Scope and purpose |
 |---|---|
 | `CatalogGeneration` | Ordered catalog publication; monotonic control-plane revision |
-| `PlanGeneration` and `PlanHash` | Immutable execution plan identity |
+| `PlanRef` (`PlanId`, `PlanGeneration`, `PlanHash`) | Immutable execution plan identity within a lineage |
 | `OperationId`, `operation_version`, `SchemaHash`, `ContractHash` | Exact operation and observable contract |
-| `IdcId`, `IdcEpoch` | Semantic domain and authority incarnation |
+| `IdcId`, `IdcGeneration` | Stable semantic domain and immutable definition generation |
+| `IdcAuthorityEpoch` | Distinct authority incarnation, carried with the definition in `IdcBinding` |
 | `PlacementEpoch` | Mapping of semantic domain to physical participants |
+| `MembershipGeneration` | Logical membership of a replication group; not placement or consensus term |
+| `ResourceGeneration`, `EscrowEpoch`, `HolderAuthorityEpoch` | Resource definition, conserved allocation lineage and exclusive holder incarnation |
 | `StorageEpoch`, `LocalCommitSeq` | One local storage history; never a cross-node timestamp |
 | `OriginId` | Original semantic commit identity from SPEC-002 §102 |
 | `MigrationId` | One durable migration procedure; all messages are idempotent by this ID |
-| `StableRequestId`, `TxnId` | Logical client request and its execution, bound before effects |
+| `RequestKey`, `TxnId`, `RequestHomeEpoch` | Tenant/namespace-qualified client identity, its immutable mapped execution, and home authority incarnation |
 
-`G+1` below denotes a candidate successor for a migration boundary; unrelated IDCs need not share a global data sequence. The catalog allocates all successor identities before activation. Reused names do not imply compatible hashes.
+SPEC-011 is authoritative for these nominal types and scopes. `IdcBinding` contains both `idc_generation: IdcGeneration` and `authority_epoch: IdcAuthorityEpoch`; neither may disappear from retained records. `G+1` below denotes a candidate successor for a migration boundary; unrelated IDCs need not share a global data sequence. The catalog allocates all successor identities before activation. Reused names do not imply compatible hashes.
 
-The records below are logical schema contracts, not a finalized RPC encoding. Persistent and network codecs MUST be deterministic, bounded, independently versioned, and reject unknown mandatory semantics.
+The records below are logical schema contracts. SPEC-012 owns deterministic bounded record codecs, receipts, snapshots and negotiation; its golden corpus remains a qualification deliverable.
 
 ## 4. Final outcomes and retained commitments
 
-```text
-FinalReceipt {
-  receipt_version
-  stable_request_id, txn_id, arguments_hash
-  operation_id, operation_version
-  contract_hash, schema_hash, plan_hash, plan_generation
-  idc_epochs[], origin_ids[]
-  outcome: COMMITTED | REJECTED
-  exact_result_bytes, result_type_hash
-  observation_token
-  durability_profile, durability_evidence_ref
-  decision_ref
-}
-```
+`FinalReceipt` is the canonical `FinalReceiptV1` owned by SPEC-012 §7. It includes RequestKey, RequestHash, TxnId, exact operation/schema/contract hashes, PlanRef, typed IdcBinding values, origin identities, COMMITTED/REJECTED outcome, exact result bytes/type/digest, retained commitments, observation token and durability/decision/completion evidence. Migration preserves the canonical payload byte-for-byte. It must not re-encode an old result under a new result codec or replace original IDC bindings with target ones.
 
-The runtime MUST bind a stable request to one argument digest and one logical outcome. A retry with different arguments returns `RequestIdentityMismatch` before effects. A retry after migration returns the same retained final result, including an application-level rejection when the contract defines it as final. It MUST NOT re-evaluate a final request under `G+1`.
+The runtime MUST preserve SPEC-012's durable RequestKey-to-TxnId/RequestHash binding created at RequestHome before dispatch. RequestHome is routed by RequestKey, not by a yet-unallocated TxnId. A retry with different semantic content returns `RequestIdentityMismatch` before effects. A retry after migration returns the same retained final result, including an application-level rejection when the contract defines it as final. It MUST NOT re-evaluate a final request under `G+1`.
 
 Admission refusals such as `MigrationInProgress` and transport timeouts do not create a final business outcome. Replies MUST distinguish them from `REJECTED`. `UNKNOWN` is a client knowledge state; it neither authorizes duplicate execution nor proves abort. A request whose status is unknown remains pinned to the original identity and resolver.
 
@@ -110,7 +101,8 @@ MigrationRecord {
   migration_id, record_version, phase
   expected_catalog_generation
   source_plan_hashes[], target_plan_hashes[]
-  source_idc_epochs[], target_idc_epochs[]
+  source_idc_bindings: SortedSet<IdcBinding>
+  target_idc_bindings: SortedSet<IdcBinding>
   source_placement_epoch, target_placement_epoch
   boundary_digest, participant_manifest
   transform_hash, transition_contract_hash
@@ -120,7 +112,7 @@ MigrationRecord {
 }
 
 CloseCertificate {
-  migration_id, authority_id, source_epoch
+  migration_id, source_authority: AuthorityBinding
   durable_fence_ref, admitted_request_frontier
   committed_origin_frontier_with_holes
   pending_txn_digest, rights_and_transfer_digest
@@ -128,7 +120,7 @@ CloseCertificate {
 }
 ```
 
-The participant manifest is fixed before closure. Authority grants, membership changes, and migrations touching an overlapping scope serialize through the same catalog compare-and-swap boundary. A holder cannot delegate authority while closing; previously delegated holders must be included.
+The participant manifest is fixed before closure. `AuthorityBinding` is SPEC-011's tagged IDC/holder/RequestHome identity, not a generic integer epoch. Authority grants, membership changes, and migrations touching an overlapping scope serialize through SPEC-011's atomic catalog CAS and semantic scope-lock predicates. Recovery/resume claims a migration worker through that same durable registry; concurrent workers cannot issue competing phase transitions. A holder cannot delegate authority while closing; previously delegated holders must be included.
 
 A vector with holes MUST preserve the holes. Taking a maximum origin sequence is not evidence that all earlier messages arrived. Close certificates reference recoverable records, not merely an unverifiable hash of lost state.
 
@@ -158,7 +150,7 @@ Validation on a live snapshot is only a preflight. It cannot replace validation 
 
 ### 8.2 Close admission
 
-Send `CloseAuthority(migration_id, source_epoch, scope)` to every authority in the manifest. Each authority serializes closure with local admission and durable grant issuance:
+Send `CloseAuthority(migration_id, source_authority_binding, scope)` to every authority in the manifest. Each authority serializes closure with local admission and durable grant issuance:
 
 1. Stop admitting new source-generation requests in scope.
 2. Persist the admission fence and a recoverable set/frontier of previously admitted requests.
@@ -220,7 +212,7 @@ Example: `T=10`, committed consumption `C=4`, held reservations `H=3`, usable ri
 
 ## 10. Sessions, reads and old messages
 
-Read/session tokens bind semantic frontiers, relevant contracts and IDC epochs. They never consist solely of a foreign `JournalLsn`. A successor snapshot MUST dominate retained dependencies after mapping old IDC identities to successors.
+Read/session tokens bind semantic frontiers, relevant contracts and full IDC bindings. They never consist solely of a foreign `JournalLsn`. A successor snapshot MUST dominate retained dependencies after mapping old IDC definitions/authorities to successors. C2 v1 tokens remain scoped to one replication group under SPEC-005/012. A migration that splits that scope across groups must retain a qualified dependency translation/composite observation plan or return `UnsupportedSessionScope`/`SessionFrontierUnavailable`; it cannot manufacture a multi-group C2 frontier or discard the old group.
 
 If the mapping is not ready, return `SessionFrontierUnavailable` or wait subject to the request deadline. A deadline response is not permission to return a weaker read. The baseline may block all in-scope reads during activation; serving pinned old snapshots is optional only when the requested contract allows them.
 
@@ -267,7 +259,7 @@ Live schema repair, arbitrary transformation code, automatic forced recovery aft
 
 Migration registers pins with MVCC GC and journal consumers. Retain everything needed by active snapshots, replica catch-up, backups, unresolved decisions, close certificates, dedupe, final-result retry policy, and token translation. Use semantic-origin horizons and local journal cursors in their own domains.
 
-Exact results may have a declared finite retention period, but expiry cannot permit re-execution. After result eviction, retain an anti-reexecution tombstone or a safely retired request namespace. A retry returns `ResultExpired` with available outcome evidence. If neither a tombstone nor namespace rejection can be guaranteed, keep the record. Arbitrary ancient IDs cannot be treated as new simply to save disk.
+Exact results may have a declared finite retention period, but expiry cannot permit re-execution. SPEC-012 owns `ResultExpired` tombstones and `IdentityExpired` namespace retirement. Retain the RequestKey, immutable RequestHash, original TxnId, terminal decision and expiry evidence across home/plan migration. A safely retired namespace remains durably rejected after every supported restore. If neither tombstone nor namespace rejection can be guaranteed, keep the record. Arbitrary ancient IDs cannot be treated as new simply to save disk.
 
 An offline node older than the safe retention floor must rebootstrap. Admission MUST reject old identities/authority even after raw journal reclamation. Storage pressure causes backpressure or a blocked migration; it never causes deletion of in-doubt evidence.
 
@@ -306,15 +298,17 @@ Measure phase duration, blocked authority count, source drain backlog, unresolve
 | EV-12 | Old causal session token after IDC merge | Mapped dependency-satisfying read or explicit unavailability; no silent local downgrade |
 | EV-13 | Journal/result GC followed by ancient retry and stale replica return | No duplicate execution or authority resurrection |
 | EV-14 | Cancel after one authority durably closed | Resume through successor generation; never remove/reuse the old fence |
+| EV-15 | Move RequestHome while first request allocation or unresolved execution races with closure | Preserve one RequestKey/TxnId/hash binding and original resolver; no competing home execution |
+| EV-16 | C2 group split makes old session dependencies span groups | Qualified explicit translation/composition or typed unavailability; no token truncation |
 
 Each schedule MUST run in the deterministic simulator and, where supported, against real processes with crash/restart. The oracle checks receipts and authority accounting throughout the history, not only final row values.
 
 ## 16. Implementation gates and traceability
 
 1. **E0:** implement immutable migration records, scope locking and deterministic transforms; test schema/identity mismatch without network protocols.
-2. **E1:** model close/drain/activate under partitions and coordinator crashes; demonstrate EV-01/02/04/05/14.
+2. **E1:** pass SPEC-010 FM-3 model checking for close/drain/activate and SPEC-011 scope/authority CAS under partitions and coordinator crashes; demonstrate EV-01/02/04/05/14.
 3. **E2:** integrate source fences, dedupe/results and storage pins; pass all supported local crash boundaries.
-4. **E3:** integrate C1/C2/C3/C5 transitions and cross-IDC decision drain; pass EV-01–14.
+4. **E3:** integrate C1/C2/C3/C5 transitions, identity-home migration and cross-IDC decision drain; pass EV-01–16 with deterministic and real-process fault evidence.
 5. **E4:** evaluate disruption and preserved observations with SPEC-010. No online overlap optimization before baseline qualification.
 
 | Requirement origin | Resolution here |

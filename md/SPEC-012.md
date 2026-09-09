@@ -1,10 +1,10 @@
 # SPEC-012 — Request Identity, Client Protocol, Wire Encoding & Compatibility
 
-**Status:** Draft 0.1 — normative design; codecs, full golden corpus and interoperability are not implemented or qualified  
-**Date:** 2026-09-09  
-**Depends on:** [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-005](SPEC-005.md)–[SPEC-011](SPEC-011.md)  
-**Trust owner:** [SPEC-013](SPEC-013.md)  
-**Qualification and implementation:** [SPEC-010](SPEC-010.md), [SPEC-014](SPEC-014.md)  
+**Status:** Draft 0.1 — normative design; codecs, full golden corpus and interoperability are not implemented or qualified
+**Date:** 2026-09-09
+**Depends on:** [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-005](SPEC-005.md)–[SPEC-011](SPEC-011.md)
+**Trust owner:** [SPEC-013](SPEC-013.md)
+**Qualification and implementation:** [SPEC-010](SPEC-010.md), [SPEC-014](SPEC-014.md)
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY express requirements, not implemented capabilities.
 
 ## 1. Ownership and scope
@@ -164,6 +164,15 @@ Certified/serial/composite evidence obeys SPEC-007/008's read barriers and publi
 ## 7. Exact final receipts and evidence
 
 ```text
+AcceptedResultV1 {
+  outcome: COMMITTED | REJECTED,
+  result_codec: CodecRef,
+  result_type_hash: Hash,
+  exact_result_bytes: Bytes,
+  result_digest: Hash,
+  commitments: CanonicalTypedValue,
+  accepted_observation: Option<ObservationTokenV1>
+}
 FinalReceiptV1 {
   receipt_version: u32,
   cluster_id: ClusterId,
@@ -194,6 +203,8 @@ FinalReceiptV1 {
 `FinalReceipt` in other SPECs is the logical alias of `FinalReceiptV1`, not another schema. `result_digest = SHA-256(UTF8("astra.result.v1") || 0x00 || canonical({result_codec,result_type_hash,exact_result_bytes}))`. `ReceiptDigest` hashes the whole receipt under `astra.receipt.v1`; its own digest/signature is not embedded in that input. Business result bytes include typed rejection reason when outcome is REJECTED. Commitments explicitly encode what was confirmed, using the operation's versioned contract. A receipt for allocation cannot imply an exact current global balance.
 
 Accepted result material is fixed at the unique decision boundary and stored atomically or deterministically recoverably with it under SPEC-002. Later publication/completion evidence refers to that immutable material. RequestHome persists the complete receipt once all required evidence exists, before returning a final reply. Composite C4/C5 requires SPEC-008 completion; an individual participant commit cannot create a final receipt. Subsequent resolution returns byte-identical canonical receipt payloads, including rejection, origin identities and observation evidence. Crypto key rotation may rewrap the same payload; it never changes the historical receipt bytes.
+
+`AcceptedResultV1` is the result material embedded in a semantic commit or prepared decision. It has no reference to the later commit digest, receipt or completion certificate. Its outcome is an accepted decision payload, not by itself a public final reply. A `FinalReceiptV1` combines those exact result/commitment fields with the completed evidence after the required barriers. Replication of an accepted effect may therefore precede a final receipt without weakening client finality or introducing a circular hash.
 
 ProtocolRecordRef binds record kind, schema version, stable record key and canonical payload hash. `DecisionCertificate`, `PublicationCertificate`, `PublishSeen` and `CompletionCertificate` retain their distinct SPEC-008 meanings. Referenced decision, authority and durability records must be recoverable and validated; unknown or unauthenticated evidence does not authorize a receipt. Hash/receipt construction is acyclic: accepted payload first, decision references its digest, publication/completion references the decision, final receipt references completed evidence, and the external security envelope covers receipt bytes last.
 

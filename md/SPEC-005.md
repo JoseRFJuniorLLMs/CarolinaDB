@@ -1,12 +1,12 @@
 # SPEC-005 — C1/C2 Runtime
 
-**Subtitle:** Semantic Replication, Idempotent Application and Causal Observations  
-**Status:** Draft 0.2 — proposed implementation contract; unimplemented and unverified  
-**Date:** 2026-09-09  
-**Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md)  
-**Integrates with:** [SPEC-006](SPEC-006.md), [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)  
-**Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog, typed identity and authority), [SPEC-012](SPEC-012.md) (request identity, client protocol and codecs), [SPEC-013](SPEC-013.md) (security and trust)  
-**Reference implementation:** Rust stable; initially modules within `astra-runtime`  
+**Subtitle:** Semantic Replication, Idempotent Application and Causal Observations
+**Status:** Draft 0.2 — proposed implementation contract; unimplemented and unverified
+**Date:** 2026-09-09
+**Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md)
+**Integrates with:** [SPEC-006](SPEC-006.md), [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)
+**Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog, typed identity and authority), [SPEC-012](SPEC-012.md) (request identity, client protocol and codecs), [SPEC-013](SPEC-013.md) (security and trust)
+**Reference implementation:** Rust stable; initially modules within `astra-runtime`
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY state requirements of this draft.
 
 ## 1. Decision and scope
@@ -43,7 +43,7 @@ The following are logical types, not Rust memory images or a finalized binary AB
 struct OriginId {                 // exactly the SPEC-002 identity
     node_id: NodeId,
     origin_epoch: OriginEpoch,
-    origin_seq: u64,
+    origin_seq: OriginSeq,
 }
 
 struct StreamId {
@@ -85,7 +85,7 @@ struct SemanticCommitV1 {
     dependencies: CausalContextV1,
     effects: CanonicalNormalizedEffects,
     effects_hash: Hash256,
-    original_outcome: TerminalOutcome, // exact result bytes/digest and commitments
+    accepted_result: AcceptedResultV1, // immutable result material; SPEC-012
     durability_policy_id: Hash256,
     semantic_digest: SemanticDigest,
 }
@@ -118,7 +118,7 @@ For a new C1/C2 invocation:
 3. Verify tenant, group, membership interpretation and token integrity before joining the client session context with operation dependencies. All v1 contexts must name the same group. Wait for local applied coverage. A C1 plan that cannot preserve the requested session contract MUST be rejected or routed to a compatible path; C1 is not permission to drop session dependencies.
 4. Choose a durable local snapshot after the wait. Read prerequisite and return-driving values only from that snapshot. Record its required causal context. Validate arguments and generate deterministic normalized effects exactly once for this invocation.
 5. Acquire short local application guards over affected keys and relevant protocol keys in canonical order. Recheck plan/fence and the preconditions required at commit. Rebase commutative deltas on the current committed state under these guards; do not overwrite it with a stale snapshot's computed value.
-6. Allocate origin and dot. Commit business mutations, local index changes, the complete request/operation/plan/IDC binding, origin/transaction deduplication, immutable `TerminalOutcome`, applied context and semantic outbox record as one SPEC-002 `CompiledBatch`. Its typed status record must retain exact result bytes/digest and issued commitments; a later independent dedupe/result write is forbidden.
+6. Allocate origin and dot. Commit business mutations, local index changes, the complete request/operation/plan/IDC binding, origin/transaction deduplication, immutable `AcceptedResultV1`, applied context and semantic outbox record as one SPEC-002 `CompiledBatch`. Its typed status record must retain exact accepted result bytes/digest and commitments atomically; a later independent dedupe/result-material write is forbidden. The final receipt is completed and persisted only after all required evidence exists under SPEC-012; it is not embedded recursively in the originating semantic digest.
 7. Cross the configured local durable journal boundary. Publish all local effects and metadata together, release guards and advertise the immutable record to peers.
 8. Return the final receipt only when its declared durability policy is satisfied. A matching retry returns the same outcome; it does not regenerate effects or recompute a newer return value.
 

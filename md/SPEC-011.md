@@ -1,6 +1,6 @@
 # SPEC-011 — Catalog, Control Plane & Authority Registry
 
-**Status:** Draft specification; implementation and qualification remain open.
+**Status:** Draft 0.1; implementation and qualification remain open.
 **Date:** 2026-09-09
 **Depends on:** [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md), [SPEC-009](SPEC-009.md).
 **Companion contracts:** [SPEC-012](SPEC-012.md) owns request identity and codecs; [SPEC-013](SPEC-013.md) owns authentication and trust.
@@ -38,6 +38,7 @@ These are distinct nominal types. Arithmetic, comparison, serialization and look
 | `RequestHomeEpoch` | `RequestHomeId` and routing scope | Request identity/admission ownership incarnation; changes only through closed state transfer |
 | `LocalCommitSeq` | `StorageId`, `StorageEpoch` | Local MVCC commit sequence; never a remote causality or authority timestamp |
 | `SerialPosition` | `IdcBinding` | Ordered semantic position within that authority incarnation; not a consensus term/index or global clock |
+| `RequestAllocationSeq` | `RequestHomeId`, allocation `RequestHomeEpoch` | Monotonic counter allocated atomically with the SPEC-012 request binding; never reused |
 | `RecordRevision` | One typed protocol record key | Local/protocol CAS revision; not an authority epoch or global commit position |
 
 `IdcEpoch` is not a normative type and MUST NOT appear in new persistent or wire records. Unqualified `authority_epoch: u64`, `idcs: Vec<(IdcId, u64)>`, and casts between the types above are forbidden at semantic interfaces. A containing record fixes the appropriate nominal epoch type; a heterogeneous authority reference uses a tagged union.
@@ -61,7 +62,7 @@ enum AuthorityBinding {
 }
 struct RequestKey {
     tenant_id: TenantId,
-    namespace: RequestNamespace,
+    request_namespace: RequestNamespace,
     stable_request_id: StableRequestId,
 }
 ```
@@ -247,21 +248,21 @@ Inspection shows catalog frontier, applied lag, each grant and durable fence, mi
 
 | ID | Schedule | Required result |
 |---|---|---|
-| CP-01 | Two overlapping migrations pass concurrent preflight | At most one obtains the semantic scope lock; no predicate phantom |
-| CP-02 | Catalog commit succeeds, reply lost, leader crashes | Same admin command resolves to the one committed result |
-| CP-03 | Old gateway races holder close | Invocation is in the recoverable admitted set or refused before effects |
-| CP-04 | Offline holder has rights; majority publishes proposed replacement | Replacement remains inactive until closure/reconciliation |
-| CP-05 | Target has all data but no activation evidence | Target cannot admit new work |
-| CP-06 | Stale catalog follower reports no migration lock | Authoritative CAS/barrier prevents conflicting activation |
-| CP-07 | Capability withdrawal races plan activation | One valid serial order; no active unsupported target |
-| CP-08 | Same `IdcGeneration` numeric value used as authority epoch | Typed interface/codec schema rejects substitution |
-| CP-09 | Restore old catalog snapshot after rights transfer and request completion | No authority resurrection or request reexecution |
-| CP-10 | Worker replaced while its old phase message is delayed | Same migration resumes; stale claim cannot advance state |
-| CP-11 | GC release races new snapshot/request-history pin | Atomic reclaim conditions preserve a recoverable cut |
-| CP-12 | Bootstrap manifests disagree or initialized voter loses contact | No second genesis under the same cluster identity |
-| CP-13 | Authority disk loss exceeds configured durability | Missing rights/outcomes remain frozen and explicitly unavailable |
-| CP-14 | Change node certificate while retaining intact authority | Identity rotates without minting rights or resetting epochs |
-| CP-15 | Two homes receive first invocation with same request key | SPEC-012 route/CAS admits one mapping; route epoch alone cannot fork it |
-| CP-16 | Old signed grant replayed after tombstone/log GC | Retired binding is refused; historical decision lookup remains distinct |
+| CAT-01 | Two overlapping migrations pass concurrent preflight | At most one obtains the semantic scope lock; no predicate phantom |
+| CAT-02 | Catalog commit succeeds, reply lost, leader crashes | Same admin command resolves to the one committed result |
+| CAT-03 | Old gateway races holder close | Invocation is in the recoverable admitted set or refused before effects |
+| CAT-04 | Offline holder has rights; majority publishes proposed replacement | Replacement remains inactive until closure/reconciliation |
+| CAT-05 | Target has all data but no activation evidence | Target cannot admit new work |
+| CAT-06 | Stale catalog follower reports no migration lock | Authoritative CAS/barrier prevents conflicting activation |
+| CAT-07 | Capability withdrawal races plan activation | One valid serial order; no active unsupported target |
+| CAT-08 | Same `IdcGeneration` numeric value used as authority epoch | Typed interface/codec schema rejects substitution |
+| CAT-09 | Restore old catalog snapshot after rights transfer and request completion | No authority resurrection or request reexecution |
+| CAT-10 | Worker replaced while its old phase message is delayed | Same migration resumes; stale claim cannot advance state |
+| CAT-11 | GC release races new snapshot/request-history pin | Atomic reclaim conditions preserve a recoverable cut |
+| CAT-12 | Bootstrap manifests disagree or initialized voter loses contact | No second genesis under the same cluster identity |
+| CAT-13 | Authority disk loss exceeds configured durability | Missing rights/outcomes remain frozen and explicitly unavailable |
+| CAT-14 | Change node certificate while retaining intact authority | Identity rotates without minting rights or resetting epochs |
+| CAT-15 | Two homes receive first invocation with same request key | SPEC-012 route/CAS admits one mapping; route epoch alone cannot fork it |
+| CAT-16 | Old signed grant replayed after tombstone/log GC | Retired binding is refused; historical decision lookup remains distinct |
 
 Before distributed-correctness claims, the catalog/migration fencing state machines require SPEC-010's mandatory formal gate, deterministic simulation and real-process fault campaigns. Model assumptions, explored bounds, unsupported transitions and non-passing results are retained with the qualification artifact. A working three-node happy path does not satisfy this gate.

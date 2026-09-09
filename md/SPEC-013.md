@@ -1,6 +1,6 @@
 # SPEC-013 — Security, Authentication & Trust Model
 
-**Status:** Draft specification; implementation and security qualification remain open.
+**Status:** Draft 0.1; implementation and security qualification remain open.
 **Date:** 2026-09-09
 **Depends on:** [SPEC-011](SPEC-011.md) for identities, catalog policy and fencing; [SPEC-012](SPEC-012.md) for client identity, canonical payloads and compatibility.
 **Applies to:** the storage, replication, escrow, certification, serial and migration boundaries of SPEC-002 and SPEC-005–009.
