@@ -1,9 +1,10 @@
 # SPEC-002 — Astra Storage Kernel
 
 **Subtitle:** Page Store, MVCC, Commit Journal, Atomic Batches and Crash Recovery  
-**Status:** Draft 0.1  
+**Status:** Draft 0.2 — proposed boundary; formats and runtime qualification pending  
 **Type:** Foundational implementation specification  
 **Depends on:** `SPEC-001 — Invariant-Compiled Consistency`  
+**Shared contracts:** [SPEC-011](SPEC-011.md) identities/catalog; [SPEC-012](SPEC-012.md) request/receipt/encoding; [SPEC-013](SPEC-013.md) trust profiles  
 **Reference implementation:** Rust stable  
 **Scope:** local storage kernel and durable boundary consumed by the distributed consistency runtime  
 **Out of scope:** protocol synthesis, C0–C5 selection, global routing, Raft, SQL optimizer, vector/graph/AI features
@@ -264,9 +265,9 @@ Old-epoch authority MUST NOT silently become valid authority in the new epoch.
 ```text
 CausalStamp
 EscrowEpoch
-CertificationEpoch
-SerialOrder
-IDCGeneration
+IdcAuthorityEpoch
+SerialPosition
+IdcGeneration
 PlanGeneration
 ```
 
@@ -778,28 +779,36 @@ AstraDB SHALL NOT pay SSI-like tracking overhead on every transaction.
 
 ## 41. CompiledBatch
 
-The semantic runtime passes a normalized batch.
+The semantic runtime passes a normalized business-operation batch. All identity types are distinct newtypes owned by SPEC-011; SPEC-012 owns request allocation and canonical result records. The records here are normative logical schemas, not Rust memory images or a frozen wire ABI.
 
 ```rust
 pub struct CompiledBatch {
+    pub batch_version: u32,
     pub txn_id: TxnId,
-    pub operation_id: OperationId,
-    pub operation_version: u32,
-
-    pub plan_hash: PlanHash,
+    pub request_key: RequestKey,
+    pub request_hash: RequestHash,
+    pub operation: OperationRef,
+    pub operation_hash: OperationHash,
+    pub contract_hash: ContractHash,
     pub schema_hash: SchemaHash,
-
-    pub idc_ids: Vec<IdcId>,
+    pub plan: PlanRef,
+    pub idc_bindings: Vec<IdcBinding>,
     pub consistency_class: ConsistencyClass,
-
+    pub origin: Option<OriginId>,
+    pub semantic_evidence: Vec<ProtocolRecordRef>,
+    pub captured_inputs: CanonicalBytes,
     pub mutations: Vec<StorageMutation>,
     pub protocol_mutations: Vec<ProtocolMutation>,
-
-    pub semantic_digest: [u8; 32],
+    pub terminal_outcome: Option<TerminalOutcome>,
+    pub semantic_digest: SemanticDigest,
 }
 ```
 
-The local kernel MUST persist enough information to redo exactly this committed state transition.
+`PlanRef` binds `PlanGeneration` and `PlanHash`. `IdcBinding` binds `IdcId`, `IdcGeneration` and `IdcAuthorityEpoch`; the vector is canonical, sorted and duplicate-free. `OriginId` is assigned at origin commit and preserved on replay; prepare may precede its allocation. `semantic_evidence` references recoverable typed causal, authority, reservation or serial records; a digest of unavailable evidence is insufficient. Captured inputs include the accepted reads/operands needed for deterministic result recovery; mutable current state cannot substitute for them.
+
+`terminal_outcome: None` is permitted for prepare or participant-local installation before the whole invocation is final. A locally final operation requires a terminal record atomically with its effects. A composite participant instead persists its prepared digest, accepted result material and unique decision reference; SPEC-008 requires publication/completion evidence before RequestHome installs the terminal receipt. Recovery must produce byte-identical result material without reevaluation. Client success MUST NOT be inferred from a participant's local `COMMITTED` state.
+
+`SemanticDigest` hashes the canonical normalized semantic payload, excluding its own digest, physical MVCC/LSN, transport envelopes and certificates that later reference this digest. The payload binds all identities, effects, captured inputs and accepted result material. Later evidence is append-only and references that immutable digest; it cannot create a circular digest or alter accepted effects. A repeated identity with different semantic payload is `RequestIdentityMismatch`/corruption, never an idempotent success.
 
 ---
 
@@ -807,15 +816,43 @@ The local kernel MUST persist enough information to redo exactly this committed 
 
 ```rust
 pub enum ProtocolMutation {
-    SetEscrowState(...),
-    SetIdcEpoch(...),
-    SetTxnStatus(...),
-    SetPlanGeneration(...),
-    SetReplicationCursor(...),
+    PutRecord(ProtocolRecordWrite),
+    SetTxnStatus(TxnStatusTransition),
+}
+
+pub struct ProtocolRecordWrite {
+    pub key: ProtocolRecordKey,
+    pub expected: ExpectedRecordRevision,
+    pub next: VersionedProtocolRecord,
+}
+pub struct TxnStatusTransition {
+    pub txn_id: TxnId,
+    pub request_key: RequestKey,
+    pub request_hash: RequestHash,
+    pub expected_revision: ExpectedRecordRevision,
+    pub next: TxnStatusRecord,
+}
+pub struct TxnStatusRecord {
+    pub revision: RecordRevision,
+    pub phase: BoundOrAdmittedOrPreparedOrInstalledOrAbortedOrTerminal,
+    pub plan: PlanRef,
+    pub idc_bindings: Vec<IdcBinding>,
+    pub prepared_digest: Option<SemanticDigest>,
+    pub decision_ref: Option<ProtocolRecordRef>,
+    pub accepted_result: Option<CanonicalBytes>,
+    pub terminal_outcome: Option<TerminalOutcome>,
+}
+pub enum TerminalOutcome {
+    Committed(FinalReceiptV1),
+    Rejected(FinalReceiptV1),
 }
 ```
 
-Protocol state MUST join the same local atomic batch as user state whenever correctness depends on both.
+`ExpectedRecordRevision = Absent | Exact(RecordRevision)`: there is no unchecked overwrite. Every status key carries immutable request binding plus a monotonic record revision; recovery validates legal predecessor/successor transitions. `Terminal` requires a matching terminal outcome; other phases cannot contain one. Terminal outcomes cannot change. A retry returns the identical stored record or typed mismatch; it never rewinds the phase. `Aborted` here denotes a protocol execution decision, not automatically a final business rejection. SPEC-012 owns the client mapping; SPEC-007/008 own legal prepared/installed transitions and publication gates.
+
+`ProtocolRecordKey = (record_kind, scope_key, record_id)`. `VersionedProtocolRecord = (record_kind, record_version, canonical_payload)` uses a closed versioned registry: escrow state/transfer records (SPEC-006), certification/reservations (SPEC-007), decision/publication records (SPEC-008), migration/fences (SPEC-009), catalog/grants (SPEC-011), and request bindings/receipts/frontiers (SPEC-005/012). Each decoder validates the owning schema and permitted transition before persistence. Unknown kinds fail closed; this is not an arbitrary user-writable blob. Protocol references bind kind/version/key and payload digest, with recoverable bytes retained.
+
+Protocol state MUST join the same local atomic batch as user state whenever correctness depends on both. Internal transfer, fence, catalog and cursor transitions use `ProtocolOnlyBatch { internal_record_id: ProtocolRecordKey, authorizing_evidence: Vec<ProtocolRecordRef>, writes: Vec<ProtocolRecordWrite> }`. It permits no user mutations and never fabricates a client request or operation identity. Duplicate internal records compare immutable content just as business batches do. The common journal boundary atomically validates all CAS preconditions and persists all writes or none.
 
 ---
 
@@ -835,15 +872,17 @@ This remains true after crash.
 
 ## 44. Plan and schema identity
 
-Every batch carries exact:
+Every business batch carries exact:
 
 ```text
-plan_hash
+RequestKey / RequestHash / TxnId
+OperationRef / OperationHash / ContractHash
+PlanRef (PlanGeneration / PlanHash)
 schema_hash
-operation_version
+IdcBinding[] (definition generation / authority epoch)
 ```
 
-The runtime MUST reject retired/incompatible generations before persistence.
+The runtime MUST reject retired/incompatible generations for new admissions before persistence using SPEC-011's grants and fences. Resolving an admitted prepare or replaying an authenticated committed record uses its retained original plan under SPEC-009; it is not new admission. Local catalog copies cannot authorize themselves.
 
 Recovery retains these identities so it can understand under which plan the transaction committed.
 
@@ -1020,7 +1059,7 @@ Unsafe mode MUST be obnoxiously explicit and never default.
 
 ## 54. Commit point
 
-A transaction may be acknowledged only after the corresponding commit decision has crossed the configured durable journal barrier.
+A local storage commit may be acknowledged only after its decision, exact result material and required identity/protocol records have crossed the configured durable journal barrier. This ACK proves local installation/durability only. Client finality additionally requires the contract's replicated witnesses and any SPEC-008 publication/completion barriers.
 
 No success before this point.
 
@@ -1168,8 +1207,8 @@ This is what allows redo-only recovery.
 5. install all user mutations
 6. install all protocol mutations
 7. mark COMMITTED
-8. release prepare resources
-9. reply COMMITTED
+8. release local staging resources only; retain protocol reservations/read gates until their owner authorizes publication/release
+9. reply locally INSTALLED/COMMITTED; this is not a client final ACK
 ```
 
 ---
@@ -1180,7 +1219,7 @@ This is what allows redo-only recovery.
 1. append AbortPrepared when durable abort is required
 2. durable barrier
 3. mark ABORTED
-4. release resources
+4. release resources only under the validated unique abort decision and protocol-owner rules
 ```
 
 ---
@@ -1213,10 +1252,12 @@ A prepare MUST bind:
 
 ```text
 txn_id
-plan_hash
-schema_hash
-IDC generation
-protocol epoch
+request_key / request_hash
+operation / operation_hash / contract_hash / schema_hash
+plan (generation + hash)
+idc_bindings (definition generation + authority epoch)
+semantic_digest / accepted result material
+original decision-authority reference and participant manifest
 ```
 
 Mismatched commit decisions MUST be rejected.
@@ -1264,7 +1305,7 @@ No partial batch.
 
 ## 69. Idempotent commit
 
-`TxnId` identifies one transaction execution.
+`TxnId` identifies the execution allocated by SPEC-012's durable RequestHome mapping. `RequestKey` is routed before that ID exists; concurrent gateways MUST NOT allocate independent executions for the same key. The binding is durable before any participant dispatch.
 
 Duplicate commit or replicated-install requests MUST NOT apply mutations twice.
 
@@ -1276,18 +1317,17 @@ Logical system keys:
 
 ```text
 TXN_STATUS/<txn_id>
+REQUEST_BINDING/<tenant>/<namespace>/<stable_request_id>
 ```
 
 Possible states:
 
 ```text
-PREPARED
-COMMITTED
-ABORTED
-IN_DOUBT
+BOUND -> ADMITTED -> PREPARED -> INSTALLED -> TERMINAL
+                     \-> ABORTED
 ```
 
-Retention is governed by safety horizons.
+Direct local execution may go from `ADMITTED` to `TERMINAL` atomically. `IN_DOUBT` is a recovery/knowledge condition on a prepared execution with unresolved decision; it never authorizes abort. Binding records at RequestHome and participant status records retain the same immutable identity. Result retention, anti-reexecution tombstones and namespace retirement follow SPEC-012; migration/GC pins follow SPEC-009/011. Expiring result bytes is not permission to remove the binding and execute again.
 
 ---
 
@@ -1295,12 +1335,13 @@ Retention is governed by safety horizons.
 
 A connection may fail after durable commit but before the client receives the response.
 
-Retry by stable transaction identity MUST resolve:
+Resolve by `RequestKey` through SPEC-012; the client need not know `TxnId`. Public replies distinguish:
 
 ```text
-COMMITTED
-ABORTED
-UNKNOWN
+Committed(FinalReceiptV1)
+Rejected(FinalReceiptV1)
+Unavailable / OutcomeUnknown
+ResultExpired / IdentityExpired
 ```
 
 Never advise blind duplicate execution.
@@ -1730,8 +1771,8 @@ Physical versions therefore need not match across replicas.
 ```rust
 pub struct OriginId {
     pub node_id: NodeId,
-    pub origin_epoch: u64,
-    pub origin_seq: u64,
+    pub origin_epoch: OriginEpoch,
+    pub origin_seq: OriginSeq,
 }
 ```
 
@@ -1797,7 +1838,7 @@ They MUST participate in atomic batches.
 
 ## 107. IDC metadata
 
-IDC generation/epoch changes are durable and versioned.
+`IdcGeneration` and `IdcAuthorityEpoch` changes are independently durable and versioned in `IdcBinding`; SPEC-011 owns their allocation and scope. Equal integers cannot be substituted.
 
 A node MUST reject stale-generation batches outside the accepted drain window.
 
@@ -1819,14 +1860,14 @@ as though it were valid.
 
 ## 109. Old-plan drain
 
-During migration, runtime MAY accept both:
+During migration, runtime may resolve previously admitted work under:
 
 ```text
 G
 G+1
 ```
 
-for an explicitly bounded period.
+only as authorized by SPEC-009's retained evidence. The baseline closes old admission and drains before target activation; it does not admit incompatible new requests concurrently. Mixed-generation admission requires a separately qualified compatibility certificate. A time limit alone cannot authorize it.
 
 Every committed batch records exact generation/hash.
 
@@ -2056,15 +2097,16 @@ C0–C5 runtime implementations belong to later SPECs.
 
 ---
 
-## 123. Storage trait
+## 123. DurableStorageKernel boundary
 
-Indicative:
+The semantic runtime depends on this kernel boundary, with the native Astra B+Tree as the selected implementation. A reference in-memory backend has an explicit simulated durability model; an experimental PostgreSQL/other backend is a research adapter. Every backend declares support for durable prepare, atomic metadata/result writes, recoverable semantic records, snapshots and retained references; unsupported obligations disable the corresponding plans. No adapter may silently emulate durable prepare with volatile memory or weaken final ACKs. Page/checkpoint tooling remains native-engine specific.
 
 ```rust
-pub trait AstraStorage {
+pub trait DurableStorageKernel {
     fn begin(&self, options: TxnOptions) -> Result<Transaction>;
 
     fn commit(&self, batch: CompiledBatch) -> Result<CommitResult>;
+    fn commit_protocol(&self, batch: ProtocolOnlyBatch) -> Result<CommitResult>;
 
     fn prepare(&self, batch: CompiledBatch) -> Result<PreparedToken>;
 
@@ -2074,7 +2116,8 @@ pub trait AstraStorage {
         decision: CommitDecision,
     ) -> Result<CommitResult>;
 
-    fn abort_prepared(&self, token: PreparedToken) -> Result<()>;
+    fn abort_prepared(&self, token: PreparedToken, decision: AbortDecision) -> Result<()>;
+    fn resolve(&self, request: &RequestKey) -> Result<LocalRequestEvidence>;
 
     fn checkpoint(&self) -> Result<CheckpointInfo>;
     fn verify(&self, mode: VerifyMode) -> Result<VerifyReport>;
@@ -2102,10 +2145,11 @@ pub trait StorageTxn {
 
 ```rust
 pub struct CommitResult {
-    pub txn_id: TxnId,
+    pub identity: BusinessTxnOrInternalRecord,
     pub local_version: VersionStamp,
     pub journal_lsn: JournalLsn,
-    pub durability: DurabilityState,
+    pub local_durability: DurabilityState,
+    pub stored_evidence: Vec<ProtocolRecordRef>,
 }
 ```
 
@@ -2399,7 +2443,7 @@ Malformed bytes must return errors, not undefined behavior.
 
 ## 147. Formal-model targets
 
-TLA+ or equivalent SHOULD model:
+TLA+ or equivalent models SHOULD additionally cover the local-only targets below. Distributed features MUST pass the mandatory FM-1/2/3 gates in SPEC-010; this local recommendation cannot waive them:
 
 ```text
 durable commit barrier
@@ -2559,7 +2603,7 @@ The core database MUST remain correct on ordinary commodity hardware.
 
 ## 157. Encryption deferred
 
-At-rest encryption belongs to a later security SPEC.
+At-rest and backup protection profiles belong to SPEC-013. A plaintext local research profile is explicitly limited to its declared environment and has no encrypted-at-rest claim.
 
 Persistent formats SHOULD reserve versioned flags for future encryption.
 
@@ -2856,6 +2900,8 @@ process killed
 
 Restart MUST recover the transaction even if zero modified pages had been flushed.
 
+It also recovers the original RequestKey-to-TxnId binding, exact result bytes, contract/plan identity and terminal decision. Two gateways racing the same key must recover one binding. Changed arguments, a substituted IDC definition/authority epoch, or changed result bytes are rejected. Crash after participant install but before whole-invocation publication must not create a final client success. Expiry followed by an ancient retry must preserve anti-reexecution evidence under SPEC-012.
+
 ---
 
 ## 176. Torn tail
@@ -3012,6 +3058,11 @@ SPEC-009 — Plan Evolution
 SPEC-010 — Qualification
            deterministic simulation, Jepsen,
            crash/network fault campaigns and benchmarks
+
+SPEC-011 — Catalog, Control Plane & Authority Registry
+SPEC-012 — Request Identity, Client Protocol, Wire Encoding & Compatibility
+SPEC-013 — Security, Authentication & Trust Model
+SPEC-014 — Implementation Profile & Vertical Slice
 ```
 
 `SPEC-009` is central to the narrower research contribution described in `PROPOSTA-DE-PESQUISA.md`: correctness must survive not only one fixed protocol, but transitions between valid execution plans.

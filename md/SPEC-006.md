@@ -1,10 +1,11 @@
 # SPEC-006 — Escrow Runtime
 
 **Subtitle:** Bounded Resources, Exclusive Rights, Transfers and Recovery  
-**Status:** Draft 0.1 — proposed protocol; proof and implementation are pending  
+**Status:** Draft 0.2 — proposed protocol; proof and implementation are pending  
 **Date:** 2026-09-09  
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md), [SPEC-005](SPEC-005.md)  
 **Integrates with:** [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)  
+**Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog and typed authority), [SPEC-012](SPEC-012.md) (request identity and codecs), [SPEC-013](SPEC-013.md) (security and trust)  
 **Reference implementation:** Rust stable; initially an `astra-runtime` module  
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY define requirements of this draft.
 
@@ -18,7 +19,7 @@ This is an implementation specification and model-checking target. Escrow and bo
 
 ## 2. Supported resource model and compiler boundary
 
-An admitted `EscrowPlan` MUST identify the invariant, resource key, exact numeric units, bound, consumption/production effects, return contract, authority scope and all interfering operations. The compiler MUST prove that the resource decomposes into exclusive quantities and that the declared operations preserve the invariant when those quantities are respected.
+An admitted `EscrowPlan` MUST identify the invariant, resource key, exact numeric units, bound, consumption/production effects, return contract, authority scope, independent authority/transfer-decision durability policies and all interfering operations. The compiler MUST prove that the resource decomposes into exclusive quantities and that the declared operations preserve the invariant when those quantities are respected. A requested failure-tolerance or availability contract that those policies cannot supply MUST be rejected.
 
 | Invariant | Spendable slack | Effect consuming rights |
 |---|---|---|
@@ -70,31 +71,34 @@ A replica's causally bounded observation may contain only a subset of committed 
 
 ## 4. Logical persistent structures
 
-Types below are logical schemas. They are not a Rust memory layout or a finalized ABI. Canonical field encodings, discriminants, quantity widths and hash inputs MUST be frozen in cross-platform fixtures before compatibility is claimed. Wire records and persisted escrow metadata SHALL have separate format versions.
+Types below are logical schemas from the SPEC-011 identity taxonomy. They are not a Rust memory layout or a finalized ABI. SPEC-012 owns canonical field encodings, discriminants, quantity widths, authenticated evidence envelopes and hash inputs; its cross-platform fixtures MUST pass before compatibility is claimed. Wire records and persisted escrow metadata SHALL have separate format versions.
 
 ```rust
 struct ResourceRef {
     invariant_id: InvariantId,
     resource_key: CanonicalKey,
-    resource_generation: u64,
+    resource_generation: ResourceGeneration,
 }
 
 struct HolderRef {
     holder_id: HolderId,          // logical allocation owner, not replica count
-    authority_epoch: u64,
+    authority_epoch: HolderAuthorityEpoch,
 }
 
 struct EscrowPlanV1 {
     format_version: u16,
     plan_hash: PlanHash,
+    plan_generation: PlanGeneration,
     schema_hash: SchemaHash,
-    contract_hash: Hash256,
+    contract_hash: ContractHash,
     invariant_id: InvariantId,
-    idc_id: IdcId,
-    idc_generation: u64,
+    idc_binding: IdcBinding,
     units: ExactNumericDomain,
     bound: CanonicalBound,
     authority_policy_id: Hash256,
+    authority_durability: AuthorityDurabilityPolicy,
+    transfer_decision_durability: TransferDecisionDurabilityPolicy,
+    client_result_durability: DurabilityPolicy,
     allowed_effects: Vec<EscrowEffectRule>,
 }
 
@@ -102,8 +106,9 @@ struct HolderStateV1 {
     format_version: u16,
     resource: ResourceRef,
     holder: HolderRef,
+    escrow_epoch: EscrowEpoch,
     active_writer: NodeId,
-    fence_generation: u64,
+    fence_catalog_generation: CatalogGeneration,
     usable: Quantity,
     reservations: Map<ReservationId, ReservationRecord>,
     outgoing: Map<TransferId, OutgoingTransfer>,
@@ -118,10 +123,15 @@ struct TransferTermsV1 {
     format_version: u16,
     transfer_id: TransferId,
     resource: ResourceRef,
+    escrow_epoch: EscrowEpoch,
     donor: HolderRef,
     receiver: HolderRef,
     amount: Quantity,
     plan_hash: PlanHash,
+    plan_generation: PlanGeneration,
+    idc_binding: IdcBinding,
+    authority_durability_policy_hash: Hash256,
+    transfer_decision_durability_policy_hash: Hash256,
     terms_hash: Hash256,
     required_context: CausalContextV1,
 }
@@ -135,22 +145,38 @@ struct TransferDecisionV1 {
     decision_origin: OriginId,
     decision_digest: Hash256,
     donor_authority_proof: AuthorityEvidence,
+    durability_evidence: TransferDecisionDurabilityEvidence,
 }
 ```
 
-`ResourceGeneration`, `authority_epoch`, IDC generation, plan generation, origin epoch and storage epoch MUST remain separate fields with separate validation rules. A higher storage epoch is not a new grant. A higher catalog generation is not proof that an old offline holder stopped spending.
+`ResourceGeneration` versions the resource definition. `EscrowEpoch` identifies its conserved allocation-manifest lineage; an ordinary transfer preserves it. `HolderAuthorityEpoch` identifies one holder's exclusive authority incarnation; holder replacement does not implicitly change allocation lineage or mint rights. `IdcBinding` carries separate `IdcId`, `IdcGeneration` and `IdcAuthorityEpoch`. `PlanGeneration`, `CatalogGeneration`, `OriginEpoch`, `StorageEpoch`, `PlacementEpoch` and `MembershipGeneration` retain SPEC-011's separate scopes and validation rules. A higher storage epoch is not a new grant. A higher catalog generation is not proof that an old offline holder stopped spending.
 
-Durable keys SHALL live in protected `ESCROW`, `IDC_META`, `REPLICATION` and `TXN_STATUS` namespaces. Every semantic commit follows SPEC-005's `OriginId`, dot, immutable digest and session rules. Each transfer phase has a stable internal phase transaction ID and origin; `TransferId` binds the whole protocol. Repeating a phase does not allocate a new operation. An identity whose terms or request hash differ MUST return `IdentityConflict` and leave the original record intact.
+Durable keys SHALL live in protected `ESCROW`, `IDC_META`, `REPLICATION` and `TXN_STATUS` namespaces. Every semantic commit follows SPEC-005's `OriginId`, dot, immutable digest and group-scoped session rules. Each transfer phase has a stable internal phase transaction ID and origin; `TransferId` binds the whole protocol. Protocol-only phases use SPEC-002's internal durable batch identity and MUST NOT invent a client `StableRequestId`. Repeating a phase does not allocate a new operation. Changed transfer terms return internal `IdentityConflict`; changed client content under one `RequestKey` returns SPEC-012 `RequestIdentityMismatch`. Both leave the original record intact.
 
 ## 5. Initialization and authority
 
-Creation of a resource generation is a coordinated catalog operation. It validates the existing business state against the invariant, computes initial slack exactly, and records one immutable genesis allocation manifest. All initial allocations plus any unallocated pool MUST sum to T. Each manifest/grant has a stable identity and is installed once. An unallocated pool is itself a logical holder with an exclusive allocator; it is not an extra uncounted source.
+Creation of a resource generation is a SPEC-011 coordinated catalog operation. It validates the existing business state against the invariant, computes initial slack exactly, and records one immutable genesis allocation manifest with its `EscrowEpoch`. All initial allocations plus any unallocated pool MUST sum to T. Each manifest/grant has a stable identity and is installed once under authenticated SPEC-013 authority evidence. An unallocated pool is itself a logical holder with an exclusive allocator; it is not an extra uncounted source.
 
 Each active holder MUST have one admitted writer and a durable exclusive writer fence. Local file ownership prevents two processes opening one directory; it does not fence a disconnected copy on another machine. Version 1 uses stable holder placement and explicit barrier handover. A passive replica can retain its holder's records for recovery but cannot spend them.
 
 Offline operation is permitted only while the same admitted holder retains its confirmed rights and durable authority under the supported failure model. Its authority cannot be forcibly reassigned while it is unreachable merely because the control plane elected a new leader. If immediate revocation is required, the plan needs a different admission policy with its own communication/lease assumptions; that policy is outside the baseline.
 
-New business invocations use SPEC-005's stable `RequestHome` and immutable request hash. A C3 plan SHALL select a rights holder at that home or forward to a bound holder without creating a second invocation identity. The request-to-holder binding is durable before its first business decision. A retry at another region may resolve the original result or wait for the home; it MUST NOT spend a second region's rights while the original outcome is unknown.
+New business invocations use SPEC-012's `RequestHome = route(RequestKey)` before the home durably CAS-binds the request key to one globally unique `TxnId` and immutable request hash. A C3 plan SHALL select a rights holder at that home or forward to a bound holder without creating a second invocation identity. The request-to-holder binding is durable before its first business decision. A retry at another region, even without a known `TxnId`, may resolve the original exact receipt or wait for the home; it MUST NOT spend a second region's rights while the original outcome is unknown.
+
+### 5.1 Independent durability policies
+
+`AuthorityDurabilityPolicy` owns recoverability of grants, active-writer fences, admission boundaries and every holder transition needed to reconstruct C/H/U/X. `TransferDecisionDurabilityPolicy` owns the unique final COMMITTED/ABORTED decision and enough terms, debit/acceptance evidence and historical artifacts to replay it. `client_result_durability` owns the client's final receipt failure scope. All three are immutable plan inputs with separate policy hashes, configured durability sets and qualification evidence; one policy cannot be inferred from another.
+
+| Policy choice | Required evidence and availability consequence |
+|---|---|
+| Authority `LocalStable` | Exclusive holder state crosses its local stable barrier before dependent admission; permanent loss can freeze its allocation, and unreachable old authority cannot be replaced |
+| Authority `RequiredDurableCopies` | Each specified authority-state copy durably retains every relevant transition before dependent spend/grant; required-copy loss blocks the transition, and copies alone do not fence an old owner |
+| Transfer decision `LocalStable` | Final decision and reconstructible terms/debit evidence survive local crash/restart; loss of the sole copy may leave X frozen |
+| Transfer decision `QuorumDurable` | The plan names a fixed decision-evidence group and `MembershipGeneration`; its intersecting quorum commits the unique decision and required reconstruction state before export or refund; unavailable quorum blocks completion |
+
+The baseline profile selects both authority and transfer-decision `LocalStable`. `RequiredDurableCopies` and `QuorumDurable` are explicitly gated capabilities, not automatic failover claims: they require SPEC-010 FM-1 plus deterministic and real-process fault qualification under the configured failure scope. A quorum evidence group may preserve a donor decision without granting any replacement writer permission to spend. Promotion still requires the independently qualified authority/fencing protocol in §11.
+
+A plan may combine a `LocalStable` client result with `QuorumDurable` transfer decisions. It MUST report the resulting transfer quorum dependency instead of claiming all C3 work remains disconnected. Final success waits for every policy boundary relevant to its business/rights transition; choosing a cheaper client receipt cannot bypass a stronger authority barrier. An acknowledgment identifies the policy, exact record digest, configured members and durable frontier. Memory receipt, eventual replication, a raw hash or a quorum of arbitrary business replicas is insufficient.
 
 ## 6. Business operation transitions
 
@@ -174,11 +200,11 @@ An expiration timestamp is not a rights-reclamation algorithm. Version 1 SHALL r
 
 The execute path SHALL:
 
-1. Resolve stable invocation identity/outcome; verify exact plan, resource generation, holder authority and absence of a local admission fence.
+1. Resolve the durable request-key mapping and exact outcome; verify the plan, typed IDC/resource/allocation/holder bindings, SPEC-011 authority admission and absence of a local fence.
 2. Satisfy the client/prerequisite causal context. Validate the declared business precondition and return contract.
 3. Acquire guards for the holder/resource, business rows, reservation/transaction keys and local index changes in canonical order. Recheck usable rights, expected versions and fences.
-4. Build a single `CompiledBatch` containing business mutations; holder rights/reservation transition; immutable outcome and request hash; origin/dot identity; causal coverage; and semantic outbox record.
-5. Commit through SPEC-002 and cross the declared durability policy before returning final success.
+4. Build a single `CompiledBatch` containing full request/operation/schema/contract/plan/IDC identity; business mutations; holder rights/reservation transition; exact terminal result and commitments; origin/dot identity; causal coverage; and semantic outbox record.
+5. Commit through SPEC-002 and cross the relevant authority and client-result durability boundaries before returning SPEC-012's `FinalReceiptV1`. Pending remote durability never permits the same invocation to execute elsewhere.
 
 Checks, debit and persistence cannot be separated by an unprotected window. Two workers each seeing `usable = 1` cannot both sell one. Crash recovery yields the complete business/rights transition or none. A disk/fsync error gives no success response; if outcome is uncertain, query the same transaction ID.
 
@@ -199,25 +225,25 @@ receiver: ABSENT -> ACCEPTED -> APPLIED
 
 ### 8.1 PREPARE_TRANSFER
 
-The donor validates exact terms, resource/holder epochs, destination membership and `usable >= q`. In one durable atomic batch it subtracts q from usable, creates the `PREPARED` outgoing record and records the dependency context justifying these rights. The quantity moves `U -> X`. Only after that durable barrier may it send `PrepareTransfer(terms)`.
+The donor validates exact terms, typed resource/allocation/holder/IDC bindings, destination membership and `usable >= q`. In one durable atomic batch it subtracts q from usable, creates the `PREPARED` outgoing record and records the dependency context justifying these rights. The quantity moves `U -> X`. Only after the configured `AuthorityDurabilityPolicy` barrier for this complete transition may it send `PrepareTransfer(terms)`. A failure before that external acknowledgment is reconciled by transfer identity; it does not authorize a second debit or a guessed refund.
 
 A duplicate prepare with identical terms returns the existing state. Insufficient rights refuses without a transfer record or business mutation. A transfer ID cannot be reused for a different amount, receiver, resource or generation.
 
 ### 8.2 ACCEPT_TRANSFER
 
-The receiver verifies the donor's admitted authority and immutable terms, checks its own admission fence, and ensures it can retain the record. It durably writes an `ACCEPTED` incoming record before returning `AcceptTransfer`. Acceptance does not increase usable rights, publish a spend capability or modify business stock. Acceptance includes the terms hash and receiver epoch.
+The receiver verifies SPEC-013 authentication plus the donor's SPEC-011 admitted authority and immutable terms, checks its own admission fence, and ensures it can retain the record. It writes an `ACCEPTED` incoming record and meets the receiver's authority-state durability policy before returning `AcceptTransfer`. Acceptance does not increase usable rights, publish a spend capability or modify business stock. Acceptance includes the terms hash, receiver `HolderAuthorityEpoch` and durability evidence.
 
 If required business dependencies are absent, the receiver MAY persist acceptance and request them, but MUST NOT install usable rights until they are satisfied. If the receiver is fenced, it rejects new acceptance except for an explicitly permitted historical drain/migration.
 
 ### 8.3 COMMIT_TRANSFER
 
-After a matching durable acceptance, the donor atomically changes `PREPARED -> COMMITTED` and records an immutable final decision. The reserved debit becomes irrevocable. It MUST cross the donor's required durable boundary before sending `CommitTransfer(decision)`.
+After a matching durable acceptance, the donor atomically changes `PREPARED -> COMMITTED` and records an immutable final decision. The reserved debit becomes irrevocable. It MUST cross both the applicable authority-state barrier and `TransferDecisionDurabilityPolicy` before sending `CommitTransfer(decision)`. The final record carries verifiable policy evidence; a local COMMITTED marker alone cannot satisfy a configured quorum decision requirement. Loss of quorum after local commit keeps the debit unavailable and the decision pending required evidence; it cannot authorize abort.
 
 The final record proves that q cannot be spent again by the donor, including after recovery. A sender's memory, a network send or receiver acceptance alone is insufficient evidence. Before receiver installation, the quantity remains X. Committed transfer evidence MUST bind its exact terms, plan, epochs and origin. Authorized authenticated donor evidence is required; a digest supplied by an arbitrary peer is not authority.
 
 ### 8.4 INSTALL_TRANSFER
 
-The receiver verifies the committed decision against its accepted terms and permitted generation, and waits for the required causal context. In one atomic batch it checks that the transfer is not already APPLIED, adds q to its usable rights, writes the `APPLIED` incoming record and records the transfer's causal/replication identity. The quantity moves `X -> U_receiver`. Only then may the receiver return `TransferApplied` or allow consumption of that grant.
+The receiver verifies the committed decision, authentication and complete configured decision-durability evidence against its accepted terms and typed bindings, and waits for the required causal context. In one atomic batch it checks that the transfer is not already APPLIED, adds q to its usable rights, writes the `APPLIED` incoming record and records the transfer's causal/replication identity. The quantity moves `X -> U_receiver`. Only after the receiver's applicable authority durability barrier may it return `TransferApplied` or allow consumption of that grant.
 
 If COMMIT arrives without the receiver's ACCEPTED record, the receiver MUST retrieve/reconcile the durable acceptance and decision evidence; version 1 does not fabricate acceptance from incomplete state. A receiver restored from an old snapshot remains unready until such reconciliation is complete.
 
@@ -225,7 +251,7 @@ A repeated COMMIT returns the existing applied result without crediting again. R
 
 ### 8.5 ABORT_TRANSFER
 
-Only the donor may choose final ABORT while its durable state is PREPARED. It atomically writes `ABORTED` and returns q to usable (`X -> U_donor`) before transmitting the final abort. A receiver that accepted but never received a final commit may then mark ABORTED. If abort arrives before prepare, it retains an abort tombstone so a late prepare cannot revive it.
+Only the donor may choose final ABORT while its durable state is PREPARED. It atomically writes `ABORTED` and records the refund (`X -> U_donor`), but that refunded quantity remains unavailable to new admissions until both authority-state and transfer-decision durability policies are satisfied. Only then may it transmit final abort or spend the refund. A receiver that accepted but never received a final commit may then mark ABORTED after verifying that evidence. If abort arrives before prepare, it retains an abort tombstone so a late prepare cannot revive it.
 
 Once COMMITTED, ABORT is illegal even if the receiver is unreachable, the client canceled or a deadline expired. Before COMMITTED, an accepted receiver is safe to abort because acceptance confers zero usable rights. Final abort and final commit are mutually exclusive under the donor's exclusive authority and local atomic status check.
 
@@ -251,7 +277,7 @@ Escrow business effects and ledger facts SHALL use SPEC-005 semantic replication
 
 The active owner's rights transitions are replicated as facts about that logical holder. A passive replica may materialize those facts for audit/recovery. It MUST NOT add the replicated holder's rights into its own spending balance. Transfer installation is the only ordinary path that moves usable rights between different holders.
 
-The causal context of produced rights SHALL include their business production effect. A transfer includes the context needed to justify its amount. The receiver MUST apply those prerequisites before spending incoming rights. A consumption commit includes the grant/production dependencies that make its local business materialization valid. Thus a replica cannot apply a sale dependent on a restock while omitting that restock.
+The causal context of produced rights SHALL include their business production effect. A transfer includes the context needed to justify its amount. The receiver MUST apply those prerequisites before spending incoming rights. A consumption commit includes the grant/production dependencies that make its local business materialization valid. Thus a replica cannot apply a sale dependent on a restock while omitting that restock. These v1 contexts are within one SPEC-005 replication group; cross-group transfers or business prerequisites require a separately qualified composite dependency contract and cannot be encoded by replacing one group token with another.
 
 Remote materialization of a consume or reserve operation updates business state once and records the owner's debit fact. It does not debit a different holder's usable rights. Causal coverage, dedupe and affected business/protocol metadata join the same atomic batch.
 
@@ -273,9 +299,11 @@ After SPEC-002 local recovery, the escrow runtime SHALL enter `RECONCILING_AUTHO
 
 Normal restart on intact stable storage may resume the same authority only after proving it was never superseded and recovering its durable local fence. A stale restored store or passive replica cannot make that claim from its pages alone.
 
-A promotion MUST prove the old writer is durably fenced and that all of its relevant decisions, reservations, transfers and acknowledged outcomes are recovered. Under the baseline's offline-capable authority, an unreachable old writer is not fenced. Promotion therefore blocks. If a future policy uses synchronous replication and an established consensus/quorum fencing protocol, its exact state-transfer and admission assumptions must be specified and qualified before enabling automatic failover.
+A promotion MUST prove through SPEC-011 that the old writer is durably fenced and that all of its relevant decisions, reservations, transfers and acknowledged outcomes satisfy their recorded durability policies and are recovered. Under the baseline's offline-capable authority, an unreachable old writer is not fenced. Promotion therefore blocks, even if a transfer decision is quorum durable. Synchronous copies or a decision quorum improve evidence survival; automatic failover additionally requires a specified and qualified consensus/quorum fencing protocol with exact state-transfer/admission assumptions.
 
 Permanent loss of the sole durable copy of a holder's state creates uncertain C/H/U/X. The runtime MUST NOT estimate remaining rights from another replica's business balance. The affected resource remains blocked unless a valid protocol can recover the missing facts. This is a stated failure limitation, not permission to preserve availability by inventing capacity.
+
+Loss after PREPARED leaves q frozen in X until a valid final decision is recovered or made by proven exclusive authority. Loss after a locally durable final decision may similarly leave evidence or installation unresolved. Diagnostics SHALL distinguish frozen rights, exhausted usable rights and global business exhaustion, and identify which policy's recovery evidence is missing. Declaring stronger receipt durability after the loss cannot reconstruct the missing authority history.
 
 Bootstrap images follow SPEC-005 and MUST include all escrow metadata and retained phase identities at a consistent logical cut. Snapshot copying never activates authority. An image containing usable rights remains passive until a valid handover. Crash before or after activation must not yield two active holders for the same allocation.
 
@@ -335,7 +363,7 @@ Finite configurable limits SHALL bound active reservations, outgoing/incoming tr
 
 ## 15. Observability
 
-Required measurements include usable rights by logical holder; active reservations; outgoing prepared/committed transfers; accepted/applied incoming transfers; rights production/consumption; transfer duration and retries; starvation; local exhaustion; reconciliation duration; blocked migrations; retained ledger bytes; and active plan/resource/authority generations.
+Required measurements include usable rights by logical holder; active reservations; outgoing prepared/committed transfers; accepted/applied incoming transfers; rights production/consumption; transfer duration and retries; starvation; local exhaustion; frozen quantity and missing evidence; authority/decision durability waits and policy hashes; reconciliation duration; blocked migrations; retained ledger bytes; and active plan/resource/allocation/authority generations.
 
 Metrics MUST distinguish approximate replica gauges from authoritative reconciled accounting. The tool `astra rights inspect <resource>` SHOULD show T/C/H/U/X only when its collected cut is complete; otherwise it reports missing holders and partial observations explicitly. It MUST NOT present a sum of stale replicas as a conservation proof.
 
@@ -343,7 +371,7 @@ Traces contain request ID, origin ID, transfer/reservation ID, terms hash, resou
 
 ## 16. Proof obligations and reference model
 
-The independent model SHALL use a logical set of holders and transfer IDs, arbitrary-precision quantities, explicit durable/volatile state and a reorderable duplicating network. It SHALL distinguish physical ledger replicas from the single logical holder state. Small-state exhaustive exploration is required for transfer and migration gates; random histories and implementation crash tests complement it.
+The independent model SHALL use a logical set of holders and transfer IDs, arbitrary-precision quantities, explicit durable/volatile state and a reorderable duplicating network. It SHALL distinguish physical ledger replicas from the single logical holder state, and client receipt durability from authority-state and transfer-decision barriers. SPEC-010 FM-1 requires model checking, passing deterministic simulation and a passing real-process fault campaign before any escrow distributed-correctness claim; migration also requires FM-3. Each supported policy combination must be included. Random histories alone do not discharge these gates.
 
 Required obligations are:
 
@@ -382,16 +410,21 @@ Each named transition SHALL be interrupted before journal append, during append,
 | ESC-017 | Consumer requires two resources at different holders; one side unavailable | No independent partial commit under an atomic contract; use admitted SPEC-008 composition or reject |
 | ESC-018 | Retry an unknown sale at disconnected region with free rights under the same TxnId | Forward/wait/resolve original binding; no second consumption at another home |
 | ESC-019 | Test quantity extremes, decimal scales, upper/lower and aggregate bounds | Exact arithmetic and correct sign mapping; overflow/unsupported coupled constraints rejected |
+| ESC-020 | Client result LocalStable with transfer decision QuorumDurable; lose quorum after donor local COMMITTED/ABORTED | No exported commit, receiver credit or spendable abort refund before required evidence; client policy cannot weaken transfer barrier |
+| ESC-021 | Permanently lose donor after PREPARED or only locally durable final decision | Missing evidence leaves rights frozen with honest failure scope; no timeout minting or business-balance reconstruction |
+| ESC-022 | Quorum decision evidence survives donor loss; old offline holder is unfenced | Evidence remains resolvable but no replacement spend authority until valid fence/state transfer; decision durability alone is not promotion |
+| ESC-023 | Substitute ResourceGeneration/IdcAuthorityEpoch for HolderAuthorityEpoch or alter EscrowEpoch during transfer | Typed binding or lineage rejection before mutation; holder replacement never creates a fresh allocation |
+| ESC-024 | Crash home CAS/holder binding; retry without TxnId at another region; send G1 prerequisites to G2 | One durable request execution binding; changed request content rejects; unsupported cross-group dependency rejects before rights mutation |
 
 ## 18. Milestone gates and source traceability
 
 | Gate | Exit evidence required |
 |---|---|
-| E0 — Model | Canonical type fixtures; explicit accounting reference model; exhaustive small transfer-state exploration covering ESC-004/005/006/008/015 |
+| E0 — Model | SPEC-011/012/013 interfaces; canonical type fixtures; explicit accounting reference model; FM-1 exploration covering ESC-004/005/006/008/015/020–023 |
 | E1 — Local resource | SPEC-002 integrated durability plus consume/produce/reservations; ESC-002/003/009/016/019 pass |
 | E2 — Distributed rights | Stable authority, full transfer protocol, causal business apply and request-home integration; ESC-001/004–008/018 pass |
 | E3 — Recovery and evolution | Passive bootstrap, fail-closed promotion, GC and SPEC-009 migration ledger; ESC-010–015 pass |
-| E4 — Qualification | Full fault campaigns and atomic-composition integration including ESC-017; all scenarios pass before an escrow correctness claim |
+| E4 — Qualification | FM-1 and applicable FM-3 evidence plus deterministic/real-process fault campaigns for each admitted durability profile and atomic composition; all scenarios including ESC-017/020–024 pass before an escrow correctness claim |
 
 No gate is complete solely because this document exists. Performance experiments follow the correctness gates and SHALL compare identical outcome semantics, failure tolerance, rights allocation and durability. Report denied operations while capacity exists elsewhere, transfer/rebalance overhead, offline-holder blockage and storage retention alongside throughput and latency.
 

@@ -1,9 +1,10 @@
 # SPEC-003 — Invariant & Effect IR
 
-**Status:** Draft 0.1 — proposed implementation contract; not implemented or proven  
+**Status:** Draft 0.2 — proposed implementation contract; not implemented or proven  
 **Date:** 2026-09-09  
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md)  
 **Consumed by:** [SPEC-004](SPEC-004.md); runtime SPECs 005–008; plan evolution in [SPEC-009](SPEC-009.md)  
+**Identity and protocol owners:** [SPEC-011](SPEC-011.md), [SPEC-012](SPEC-012.md), [SPEC-013](SPEC-013.md)  
 **Scope:** restricted DSL, typed AST, deterministic contract IR, effects, footprints, dependency hypergraph and proof obligations  
 **Reference implementation:** Rust stable; conceptual types below do not freeze a Rust or network ABI  
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY express requirements.
@@ -20,7 +21,7 @@ The proposal's narrow research target is observable composition and evolution, n
 
 Let `S` be a finite typed map from `(record_id, primary_key)` to a record. The semantic model additionally contains committed internal facts, request outcomes, causal dependencies and authority state. Physical page layout, journal LSN and replica-local MVCC sequence are outside `S`'s business meaning.
 
-An invocation is `(StableRequestId, OperationId, operation_version, arguments)`. Within its declared request namespace a `StableRequestId` SHALL bind exactly one arguments hash, operation identity and `TxnId`. A retry with the same identity and different content is an identity error, not a new invocation. SPEC-009 specifies retention and migration of this binding.
+An invocation is `(RequestKey, OperationRef, arguments, requested_observation)`. `RequestKey = (TenantId, RequestNamespace, StableRequestId)` is the tenant-qualified identity from SPEC-012. The runtime routes by `RequestKey` before allocating a `TxnId`; its RequestHome atomically binds the key to one globally unique `TxnId` and immutable `RequestHash` before dispatch or effects. The hash covers the exact operation/schema/contract identities, canonical arguments and original observation/session inputs defined by SPEC-012. It excludes transient routing and plan choice. A concurrent retry receives the same binding; changed semantic content returns `RequestIdentityMismatch`. SPEC-012 owns allocation, resolution and expiry; SPEC-009 preserves those records across migration.
 
 The sequential evaluator has the following contract:
 
@@ -35,7 +36,7 @@ commit(candidate, authorized_plan)
 
 `Candidate` is private and MUST NOT be returned as success. An effect is accepted only if its definedness checks, preconditions, postconditions and all affected invariant checks hold under the plan's observation and authority rules. Business rejection changes no business state; a deduplication result MAY still be persisted.
 
-`Unknown` after a transport failure is an unresolved client outcome. It is not evidence of rejection or permission to use another `TxnId`. The original request SHALL be resolved by identity. Once success is final, recovery and later generations MUST preserve its exact result and commitments.
+`OutcomeUnknown` after a transport failure is an unresolved client outcome. It is not evidence of rejection or permission to use another `TxnId`. The original request SHALL be resolved with `ResolveRequest(RequestKey)` from SPEC-012. Once success is final, recovery and later generations MUST preserve its exact result and commitments.
 
 An invariant over an observed snapshot applies only when the observation contract identifies a complete admissible snapshot of its scope. Combining arbitrary stale rows from different nodes is not such a snapshot. Queries used to authorize mutation MUST appear in the operation's read footprint and obligations.
 
@@ -229,14 +230,15 @@ ContractIR {
     input_visibility: LocalSnapshot | CausalContext | CertifiedScope | SerialScope,
     result_semantics: Receipt | SnapshotValue | ExactOrderedValue,
     result_scope: ScopeExpr,
-    session: Set<ReadYourWrites | MonotonicReads | CausalDependencies>
+    session: Set<ReadYourWrites | MonotonicReads | CausalDependencies>,
+    session_scope: None | ReplicationGroup(GroupSelector) | CompositeScope(ScopeExpr)
   },
   durability: LocalStable | ReplicatedStable(FailureDomainRequirement),
   partition_outcomes: Set<Wait | Unavailable | AuthorityUnavailable>,
   authority_requirements: Vec<AuthorityRequirement>,
   refusal_semantics: BusinessPredicate | MissingAuthority | MissingDependency,
   commitment: FinalWhenDurable,
-  request_namespace: NamespaceId
+  request_namespace: RequestNamespace
 }
 ```
 
@@ -245,6 +247,8 @@ These are contract semantics; they do not choose C labels. The initial DSL uses 
 `Receipt` returns arguments/identities and a commitment derived from accepted effects, such as “reservation R for 3 units accepted.” It MUST NOT imply current global stock. `SnapshotValue` returns an exact value from its identified admissible snapshot and includes that frontier. `ExactOrderedValue` returns the value at a declared ordered point for the full result scope. An increment receipt and increment-and-return-current-global-value are different contracts and may select different plans.
 
 Read-your-writes, monotonic reads and causal dependencies SHALL be retained in session context. They do not imply linearizability. A final business rejection such as `OutOfStock` requires an observation that establishes that predicate for its specified scope. Lack of local rights yields `AuthorityUnavailable`, not `OutOfStock`.
+
+`session_scope = None` is valid only for an empty session guarantee set. The C2 v1 profile supports exactly one resolved replication group; all matching causal prerequisites and session observations must fit that group. A contract requiring dependencies across groups remains explicit in IR and requires a separately qualified composite plan. The compiler MUST reject it as `UnsupportedSessionScope` if none exists. It must not silently discard, reset or widen a group token. An application may maintain independent group sessions, but their union is not a promised cross-group causal session. SPEC-005 defines group scheduling; SPEC-012 defines the client-visible mismatch and retry behavior.
 
 `LocalStable` promises survival of supported local crash/restart, not survival of permanent loss of the only durable replica. `ReplicatedStable(policy)` requires the policy's durable witnesses before a final result. The compiler MUST report an unsatisfiable durability/partition combination; it cannot weaken it to preserve availability. No fairness, starvation freedom or bounded response time is implied without an explicit supported contract extension.
 
@@ -271,6 +275,8 @@ Arrays preserving evaluation order remain ordered. Mathematical sets and maps en
 Hashing uses `SHA-256(UTF8(domain) || 0x00 || canonical_bytes)`, with separate domains `astra.schema.v1`, `astra.operation.v1`, `astra.invariant.v1` and `astra.contract.v1`. Hash inputs exclude the hash field itself, source paths, source spans, timestamps and host-specific metadata. An operation hash includes its full contract and referenced type identities/versions. A schema hash includes all schema declarations and invariant versions; adding an operation also changes the separately emitted module hash `astra.module.v1` and requires reanalysis of compatibility.
 
 Decoders SHALL reencode and compare bytes before accepting a canonical artifact. Compatibility is never inferred from equal human-readable names. Golden bytes and digests must be frozen before persistent compatibility is claimed. The ordered physical key codec remains separately versioned under SPEC-002 §11; JSON artifact encoding is not a B+Tree key codec.
+
+SPEC-003 owns these IR bytes and domains. SPEC-012 reuses these scalar/canonical rules for separately versioned request, receipt and protocol records, and owns their envelopes, snapshot framing and negotiation. Adding `session_scope` changes canonical contract bytes; pre-0.2 drafts have no frozen compatibility. Implementations MUST NOT decode missing scope as an implicit multi-group guarantee.
 
 ## 11. Proof obligations exported to the compiler
 
@@ -339,6 +345,7 @@ Initial limitations are finite typed records, closed operation sets per generati
 | S003-A08 | Transfer and reserve/release reference evaluations preserve conservation and atomic groups, including all declared rejection cases. |
 | S003-A09 | Fuzzed decoders and bounded input expansion cannot bypass type, footprint or resource checks. |
 | S003-A10 | Receipt, causal snapshot and exact ordered result remain observably distinct in IR and interpreter histories. |
+| S003-A11 | Nonempty session guarantees have explicit scope; a G1 prerequisite and G2 operation cannot lower to group-scoped C2 without an explicit supported composite contract. |
 
 Milestone `IR0` delivers grammar, typed AST and a slow sequential interpreter (A01, A04, A08). `IR1` delivers canonical codecs and golden fixtures (A02, A03, A09). `IR2` delivers footprint/IDC templates and obligation export (A05, A06, A10). `IR3` integrates request/result bindings with SPEC-002 and runtime conformance (A07). These refine SPEC-001 M0/M1; IR3 depends on the relevant storage/runtime milestones and is not an implementation claim.
 
@@ -353,4 +360,4 @@ Milestone `IR0` delivers grammar, typed AST and a slow sequential interpreter (A
 | [Proposal §§1–2 and direction A](../PROPOSTA-DE-PESQUISA.md#1-a-propriedade-fundamental) | Results, visibility, authority and durability are contract inputs; composition/evolution remain research obligations. |
 | [Prior-art notes](../research/consistency-prior-art.md#arquitetura-mínima-para-testar-a-hipótese) | Complete operation contracts and observable commitments; no claimed novelty from a compiler flag. |
 
-Open work before compatibility is declared: freeze parser/IR fixtures; define the separate ordered tuple-key codec; implement the interpreter; prove the supported normalization rules; establish the complete request-retention contract in SPEC-009; and qualify each analysis rule under SPEC-010. None of these may be replaced with an unverified runtime heuristic.
+Open work before compatibility is declared: freeze parser/IR fixtures; define the separate ordered tuple-key codec; implement the interpreter; prove the supported normalization rules; implement SPEC-012's request-retention contract with SPEC-009 migration; and qualify each analysis rule under SPEC-010. None of these may be replaced with an unverified runtime heuristic.

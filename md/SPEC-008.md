@@ -1,12 +1,13 @@
 # SPEC-008 — Serial IDC Runtime
 
 **Subtitle:** Ordered Execution, Distributed Decisions and Atomic Publication  
-**Status:** Draft 0.1 — proposed implementation contract; not an implemented or proven protocol  
+**Status:** Draft 0.2 — proposed implementation contract; not an implemented or proven protocol  
 **Date:** 2026-09-09  
 **Type:** Distributed runtime specification  
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md)  
 **Protocol interfaces:** [SPEC-005](SPEC-005.md), [SPEC-006](SPEC-006.md), [SPEC-007](SPEC-007.md), [SPEC-009](SPEC-009.md)  
 **Qualification:** [SPEC-010](SPEC-010.md)  
+**Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog and typed authority), [SPEC-012](SPEC-012.md) (request identity, receipts and codecs), [SPEC-013](SPEC-013.md) (security and trust)  
 **Reference implementation:** Rust stable; consensus and sequencing outside `astra-storage`  
 **Normative terms:** MUST, MUST NOT, SHOULD, SHOULD NOT and MAY express requirements on a conforming implementation.
 
@@ -44,7 +45,7 @@ The initial fault model is crash-stop/crash-recovery; message loss, duplication 
 
 ## 2. What C5 can and cannot fix
 
-C5 is the fallback when weaker-class safety is unproven and a supported safe sequential execution exists. Serialization cannot repair a contract whose single operation breaks an invariant, returns an unauthorized promise, overflows silently or calls an unknown evaluator.
+C5 is a candidate fallback when another template's safety is unproven and a supported safe sequential execution exists. Protocol families are not a total order; SPEC-004 selects a safe plan from the qualified finite library under its declared cost function. Serialization cannot repair a contract whose single operation breaks an invariant, returns an unauthorized promise, overflows silently or calls an unknown evaluator.
 
 The compiler MUST reject rather than select C5 if it cannot construct an executable validator and complete semantic boundary. An arbitrary predicate may execute serially only when its deterministic evaluator and necessary state scope are supported and bounded. The statement in SPEC-001 §18 that unsupported invariants use C5 is conditional on those requirements.
 
@@ -58,7 +59,7 @@ Final state-dependent rejection is also an observable decision: it must be based
 
 | Component | Owns | Must not infer |
 |---|---|---|
-| Compiler/catalog | Contract, invariant closure, plan, IDC mapping and published generations | Successful execution merely from a plan hash |
+| Compiler / SPEC-011 catalog | Contract, invariant closure, plan, typed IDC mapping, authority registry and published generations | Successful execution merely from a plan hash |
 | IDC runtime | Admission, semantic order, locks, evaluator and exact result | Distributed durability from a local fsync |
 | Consensus adapter | Leadership, committed authority log, quorum evidence and ordered application | Business validity of an opaque command |
 | Transaction decision authority | One sealed participant set and one final outcome/publication record | A missing participant response means abort |
@@ -69,29 +70,34 @@ Consensus traffic MAY be multiplexed, but one unrelated hot IDC must not automat
 
 ## 4. Canonical records
 
-These records are conceptual interfaces, not a frozen binary format or public RPC schema. Every persisted or transmitted interpretation requires an explicit version, canonical encoding, size bound and compatibility fixture before release.
+These records are conceptual interfaces using SPEC-011's strong types, not a frozen binary format or public RPC schema. SPEC-012 owns explicit versions, canonical encodings, size bounds, compatibility fixtures and client receipt codecs. SPEC-013 owns authenticated evidence, peer identity, authorization and downgrade protection. All three contracts are admission/release dependencies.
 
 ```text
 IdcAuthority {
-    idc_id; idc_generation
+    idc_binding: IdcBinding
     semantic_membership_hash
-    authority_id; authority_epoch
+    authority_id
+    placement_epoch: PlacementEpoch
+    membership_generation: MembershipGeneration
     consensus_config_id
     voting_members
     physical_participants
-    admitted_plan_generations
+    admitted_plan_generations: [PlanGeneration]
     recovery_state
 }
 
 SerialOrder {
-    idc_id; idc_generation; authority_epoch
-    semantic_position
+    idc_binding: IdcBinding
+    semantic_position: SerialPosition
 }
 
 SerialCommand {
-    txn_id; request_hash
-    operation_id; operation_version
-    contract_hash; schema_hash; plan_hash; plan_generation
+    txn_id: TxnId; request_key: RequestKey; request_hash: RequestHash
+    request_home_epoch: RequestHomeEpoch
+    operation: OperationRef; operation_hash: OperationHash
+    contract_hash: ContractHash; schema_hash: SchemaHash
+    plan_hash: PlanHash; plan_generation: PlanGeneration
+    idc_bindings: [IdcBinding]
     canonical_arguments
     admission_permit
     sealed_membership_hash; declared_footprint
@@ -109,9 +115,9 @@ SerialExecutionRecord {
 }
 ```
 
-`semantic_position` is allocated by the IDC authority. A consensus term/index pair is evidence for an authority-log entry, not a replacement for `LocalCommitSeq`. Gaps caused by control/abort records are legal and explicit. Positions MUST NOT be reused across destructive restore, IDC generation change or authority replacement.
+`SerialPosition` is allocated by the IDC authority and scoped to the complete `IdcBinding = (IdcId, IdcGeneration, IdcAuthorityEpoch)`. A consensus term/index pair is evidence for an authority-log entry, not a replacement for `SerialPosition` or `LocalCommitSeq`. Gaps caused by control/abort records are legal and explicit. The complete serial-order identity MUST NOT be reused across destructive restore, IDC generation change or authority replacement; a scalar position is never compared across bindings without a verified transition mapping.
 
-The stable client request identity binds operation version, canonical arguments and declared session/read contract. It excludes mutable routing addresses. Result and effect digests bind the chosen execution; identical `TxnId` with different immutable request content returns `IdentityConflict` before work is admitted.
+The stable client `RequestKey = (TenantId, RequestNamespace, StableRequestId)` determines `RequestHome = route(RequestKey)` before allocation of `TxnId`. SPEC-012's home durably CAS-creates exactly one mapping to a globally unique transaction and immutable request hash. That hash covers operation/schema/contract identities, canonical arguments and original session/read contract; it excludes plan choice and mutable routing addresses. Result and effect digests bind the chosen execution. Changed content under one request key returns `RequestIdentityMismatch` before work is admitted; an unknown mapping or execution cannot be bypassed by a new transaction identity.
 
 ## 5. Authority durability and sequencing
 
@@ -131,7 +137,7 @@ The authority log SHALL contain sufficient bytes to reconstruct ordered admissio
 
 Followers apply committed records in order and never acknowledge a serial read from a speculative or merely received prefix. A leader must pass an authoritative read barrier before serving a current serial read; wall-clock leases without a separately specified bounded-clock proof are unsupported in v1.
 
-Leader election term and logical authority epoch are different. Election within the same consensus authority preserves prepared transactions and semantic order. Moving that authority or changing an IDC boundary requires SPEC-009 fencing and state transfer; it cannot be implemented by deleting the old group's prepared metadata.
+Leader election term and `IdcAuthorityEpoch` are different. Election within the same consensus authority preserves prepared transactions and semantic order. `IdcGeneration` versions the semantic domain; `PlacementEpoch` versions placement; `MembershipGeneration` versions the configured member set; `CatalogGeneration` and `PlanGeneration` have their separate SPEC-011 meanings. Moving authority or changing an IDC boundary requires a SPEC-011 registry decision and SPEC-009 fencing/state transfer; it cannot be implemented by deleting the old group's prepared metadata. Catalog leader changes do not grant runtime leadership or fence offline holders.
 
 ## 6. Stable IDC membership
 
@@ -142,9 +148,9 @@ Before admission, the runtime SHALL resolve a complete conservative footprint th
 The transaction seals:
 
 ```text
-sorted IDC IDs and generations
+sorted typed IdcBindings (IdcId; IdcGeneration; IdcAuthorityEpoch)
 semantic membership hashes
-authority IDs and epochs
+authority IDs; typed placement epochs and membership generations
 physical participant groups and durability policy
 contract/plan identity
 ```
@@ -178,7 +184,8 @@ The single-IDC serial executor MUST NOT block its consensus apply loop while wai
 ## 8. Single-IDC ordered execution
 
 ```text
-1. Resolve the stable request identity; replay an existing final result.
+1. Authenticate/authorize under SPEC-013; resolve the durable SPEC-012 RequestKey
+   mapping at its home; replay an existing FinalReceiptV1.
 2. Verify the generation/admission permit and sealed semantic footprint.
 3. Through current consensus authority, enqueue the command and acquire root X.
 4. Assign its SerialOrder only at admission to the protected execution slot.
@@ -201,13 +208,17 @@ A single physical participant MAY combine authority decision and storage commit 
 
 The protocol applies to C4 and C5. It SHALL use one durable decision authority per transaction, chosen deterministically as the configured authority of the lowest canonical participating IDC ID at admission. This is a participant-scoped coordinator; it is not one global cluster sequencer.
 
-The authority is itself consensus replicated. Its identity and assignment epoch remain pinned for the transaction, including recovery after leader change. SPEC-009 must preserve a forwarding/resolution route if that authority is relocated or retired.
+The authority is itself consensus replicated. Its identity and complete `IdcBinding` remain pinned for the transaction, including recovery after leader change. The request home and decision authority have different responsibilities: the home owns the one RequestKey mapping and execution assignment; the decision authority owns the sealed transaction decision and publication. A durable home binding must point to that authority before `TxnBegin`; a missing begin response never authorizes choosing a second decision authority. SPEC-011 and SPEC-009 must preserve a verified forwarding/resolution route if either authority is relocated or retired.
 
 ```text
 TxnBegin {
-    txn_id; request_hash; contract_hash
-    plan_hash; plan_generation; schema_hash
-    decision_authority_id; decision_authority_epoch
+    txn_id: TxnId; request_key: RequestKey; request_hash: RequestHash
+    request_home_epoch: RequestHomeEpoch
+    operation: OperationRef; operation_hash: OperationHash
+    contract_hash: ContractHash; schema_hash: SchemaHash
+    plan_hash: PlanHash; plan_generation: PlanGeneration
+    idc_bindings: [IdcBinding]
+    decision_authority_id; decision_idc_binding: IdcBinding
     participant_set: [ParticipantDescriptor]
     participant_set_hash
     membership_hashes; admission_permit
@@ -217,15 +228,18 @@ TxnBegin {
 
 ParticipantDescriptor {
     participant_id; role: Certifier | SerialAuthority | DataAuthority
-    authority_epoch; consensus_config_id
-    idc_ids; storage_authorities
+    idc_bindings: [IdcBinding]
+    placement_epoch: PlacementEpoch
+    membership_generation: MembershipGeneration
+    consensus_config_id; storage_authorities
     expected_batch_digest
     required_durability
+    descriptor_hash
 }
 
 PrepareVote {
     txn_id; begin_digest; participant_set_hash
-    participant_id; authority_epoch
+    participant_id; participant_descriptor_hash
     vote: Yes(prepared_tokens, reservation_digest, payload_digest)
         | No(reason)
     replicated_durable_reference
@@ -236,12 +250,12 @@ DecisionCertificate {
     outcome: Commit | Abort(reason)
     all_required_vote_references
     effects_digest; result_digest; commitment_digest
-    decision_authority_id; authority_epoch
+    decision_authority_id; decision_idc_binding: IdcBinding
     committed_authority_log_reference
 }
 ```
 
-A certificate is verified evidence from trusted protocol participants under the crash-fault model. Its digest alone is not authoritative. Receivers verify the sender/authority binding and committed authority record through the internal authenticated transport or authoritative lookup. It is not a mathematical correctness proof or a Byzantine quorum certificate.
+A certificate is verified evidence from trusted protocol participants under the crash-fault model. Its digest alone is not authoritative. Receivers verify SPEC-013 sender/authority authentication and the exact SPEC-011 admission plus committed authority record. Votes from heterogeneous participant roles bind the complete descriptor hash; a bare integer `authority_epoch` is not an acceptable replacement for its typed IDC, placement and membership fields. It is not a mathematical correctness proof or a Byzantine quorum certificate.
 
 One role may represent several local shards only when its yes vote explicitly covers every exact durable prepared payload. Data and certifier voting sets are explicit; a catalog majority or a random set of reachable replicas is never substituted for a missing required participant.
 
@@ -251,7 +265,7 @@ One role may represent several local shards only when its yes vote explicitly co
 
 The coordinator SHALL first quorum-persist `TxnBegin` with the complete immutable participant set. No participant may issue a durable yes vote without the matching begin evidence. Repeated begin with identical fields returns its existing record; changed request, participant or effect identity is rejected.
 
-The coordinator's request-dedup state and `TxnBegin` are updated atomically in its replicated state machine. A caller that loses the begin response consults status under the same `TxnId`; it cannot safely create an unrelated replacement request.
+The coordinator's execution-dedup state and `TxnBegin` are updated atomically in its replicated state machine after verifying the existing request-home mapping and its one execution assignment. This does not allocate a second RequestKey mapping. A caller that loses the begin response uses SPEC-012 `ResolveRequest` with its original RequestKey, even if it never learned `TxnId`; it cannot safely create an unrelated replacement request.
 
 ### 10.2 Prepare participants
 
@@ -262,8 +276,9 @@ The coordinator obtains all logical locks in the order from §7 and asks each pa
 2. Resolve any existing outcome for this identity before accepting a new prepare.
 3. Verify the required authority/order/certification evidence and reservations.
 4. Validate the exact batch digest and deterministic local obligations.
-5. Persist PrepareBatch with user changes, indexes, revision updates,
-   dedup/result metadata and protocol changes as applicable.
+5. Persist PrepareBatch with the complete SPEC-002 request/operation/contract/
+   plan/IDC identity, user changes, indexes, revisions, exact terminal result,
+   issued commitments and protocol changes as applicable.
 6. Meet the configured replication durability barrier for the prepared payload.
 7. Persist a Yes vote/reservation state in its authority group before replying Yes.
 ```
@@ -303,7 +318,7 @@ Physical installs may complete at different times. The runtime SHALL therefore e
 
 ```text
 Installed {
-    txn_id; decision_digest; participant_id; authority_epoch
+    txn_id; decision_digest; participant_id; participant_descriptor_hash
     prepared_batch_digest
     installed_frontier
     replicated_durable_reference
@@ -317,7 +332,7 @@ PublicationCertificate {
 }
 
 PublishSeen {
-    txn_id; publication_digest; participant_id
+    txn_id; publication_digest; participant_id; participant_descriptor_hash
     durable_publication_frontier
 }
 
@@ -340,7 +355,8 @@ The algorithm is:
 5. The decision authority verifies every required PublishSeen and quorum-persists
    CompletionCertificate.
 6. Participants use completion evidence to release transaction reservations.
-7. The gateway may return final success with the durable result and session frontier.
+7. The gateway may return SPEC-012 FinalReceiptV1 with the durable exact result,
+   commitments, decision/publication/completion evidence and scoped session evidence.
 ```
 
 The coordinator retains protocol progress and retries missing install/publication messages after failures. It cannot acknowledge success after just step 3 if the declared read contract requires every participant to be ready to serve the completed transaction.
@@ -376,18 +392,26 @@ The gate interval prevents any intersecting C4/C5 writer from modifying the cut 
 ```text
 SnapshotCut {
     cut_id; read_contract_hash
+    idc_bindings: [IdcBinding]
     idc_membership_hashes
     authority_frontiers
-    local_snapshots: [(storage_authority, storage_epoch, visible_seq)]
+    local_snapshots: [SnapshotParticipant]
     publication_frontiers
-    causal_session_frontier
+    required_scoped_session_evidence
     retention_guards
+}
+
+SnapshotParticipant {
+    storage_authority; participant_descriptor_hash
+    storage_epoch: StorageEpoch; visible_seq: LocalCommitSeq
 }
 ```
 
 The complete query footprint must be known or safely enclosed before snapshot capture. For joins, scans and dynamic discovery, an uncovered new IDC requires a restart with the enlarged sorted gate set. Pagination must remain on the same cut. A resource limit may expire the query with a typed error; it cannot silently continue on a new snapshot.
 
-Read-your-writes and monotonic session reads use the returned frontier. A server unable to reach that frontier waits, routes to an eligible authority or returns unavailable. It never drops the session token to return stale data.
+Read-your-writes and monotonic session reads use authenticated returned evidence bound to the strong read contract and its exact IDC footprint. A server unable to reach that evidence's required frontier waits, routes to an eligible authority or returns unavailable. It never drops the session token to return stale data. The qualified evidence type and transport belong to SPEC-012; a runtime capability may claim only the scopes it implements.
+
+This coordinated multi-IDC snapshot does not enlarge SPEC-005's group-scoped `SessionTokenV1`. A sequence of C2 operations in G1/G2 followed by a read in G3 has no implicit cross-group guarantee. Supporting that session requires an explicitly qualified composite contract with complete dependency transport, authority/publication evidence and scope conversion; absent that capability the compiler/runtime returns `SessionScopeMismatch` or `UnsupportedComposition` before effects. A collection of unrelated tokens or the C5 class label alone is insufficient.
 
 ### 12.2 Atomicity example
 
@@ -404,7 +428,7 @@ Independent reads in different requests may straddle T in time; the API does not
 
 `LocalSnapshot` alone is a storage primitive, not a C5 serial read or a multi-IDC snapshot. In v1, public authoritative C4/C5 reads use the gates above, including a one-IDC point read. This may require communication under failure; offline strong reads are not promised.
 
-A separate local projection may expose an explicitly weaker observation under SPEC-005. Its token must identify its causal/publication closure and scope. It cannot be used as a certified business decision, mislabel independent local snapshots as an atomic multi-IDC cut, or expose unresolved/unpublished transaction fragments as final state.
+A separate local projection may expose an explicitly weaker observation under SPEC-005. Its one-group token must identify its causal/publication closure and scope. It cannot be used as a certified business decision, mislabel independent local snapshots as an atomic multi-IDC cut, infer cross-group session guarantees, or expose unresolved/unpublished transaction fragments as final state.
 
 A lagging follower can serve the coherent path only after an authoritative barrier and application through the required frontier. A stale leader or a replica restored from a previous storage epoch must not claim current authority because it still has readable pages.
 
@@ -467,7 +491,7 @@ The system MAY advertise readiness by IDC rather than wait for every unrelated c
 
 An exact duplicate command, prepare, decision, installation or publication message SHALL return the existing phase/outcome and MUST NOT apply effects twice. Identity mismatches are protocol errors even if the apparent final values happen to match.
 
-Request records bind immutable result bytes or a durable content reference. Recovery and plan changes return the original versioned result. A new application request may choose a new identity only when the caller intentionally requests a separate execution; the server cannot manufacture one to hide an unknown outcome.
+Request records retain the original RequestKey mapping, immutable request hash, exact result bytes or a durable content reference, commitments and SPEC-012 FinalReceiptV1 evidence. Recovery and plan changes return the original versioned result. A new application request may choose a new identity only when the caller intentionally requests a separate execution; the server cannot manufacture one to hide an unknown outcome. Protocol-only phase records use SPEC-002 internal identities and do not invent client request keys.
 
 GC must satisfy every relevant horizon:
 
@@ -482,7 +506,7 @@ plan/authority migration references and issued commitments
 
 Prepared work never expires by TTL. A decision authority may compact completed transaction details only after required participant acknowledgement and equivalent durable deduplication/outcome state exists. A lagging participant must recover from an authoritative checkpoint containing that state before new admission.
 
-Detailed old results may be retired only within the advertised retention contract. Expired identities remain non-reusable through durable epoch/client-sequence fences or retained tombstones. A late request returns `RetryIdentityExpired`; it is not treated as a fresh debit. Commitments whose obligations remain live cannot be discarded merely because their response retention elapsed.
+Detailed old results may be retired only within the advertised retention contract and SPEC-011 retention decision. Expired identities remain non-reusable through durable epoch/client-sequence fences or retained tombstones. A late request returns SPEC-012 `IdentityExpired`; it is not treated as a fresh debit. Commitments whose obligations remain live cannot be discarded merely because their response retention elapsed.
 
 Backpressure must reject new transactions before it threatens retention of in-doubt state. Operators may restore communication, disk capacity or verified replica state; a force-abort command without an authoritative unique decision is outside this specification and MUST NOT be offered as a safe repair.
 
@@ -531,7 +555,7 @@ These boundaries describe unavailable implementations. They are not alternate mo
 Required typed outcomes include:
 
 ```text
-IdentityConflict; RetryIdentityExpired
+RequestIdentityMismatch; IdentityConflict; IdentityExpired; SessionScopeMismatch
 UnsupportedFootprint; UnsafeSequentialContract; UnsupportedEvaluator
 PreconditionRejected; PostconditionRejected; InvariantRejected; ArithmeticError
 StalePlan; StaleSchema; StaleAuthority; MembershipChanged; UnfencedWriter
@@ -588,8 +612,12 @@ These are release obligations. No execution or pass result is claimed by this do
 | C5-018 | Failure of one data copy after yes | Prepared payload/decision remains available within declared failure tolerance |
 | C5-019 | Query discovers new IDC, paginates or exceeds retention | Restart before results or explicit expiry; no mixed-cut output |
 | C5-020 | Control/recovery record arrives while user lock request waits | Authority state machine makes protocol progress without apply-loop deadlock |
+| C5-021 | Two ingress nodes first submit one RequestKey; crash after home mapping/assignment but before BEGIN reply | One mapping and decision authority; ResolveRequest works without client-known TxnId and returns the exact original receipt |
+| C5-022 | Substitute IDC generation for authority epoch or replay a vote under a changed participant descriptor | Typed binding/hash/authentication checks reject before decision or install; numeric equality grants no authority |
+| C5-023 | Present C2 G1/G2 tokens for unqualified cross-group strong-session read | Scope rejects or separately qualified complete composite evidence is required; no partial context or implicit C2 guarantee |
+| C5-024 | Upgrade/downgrade codecs with prepared and unpublished work; forged peer/certificate | SPEC-012/013 reject unknown mandatory semantics and unauthenticated authority while preserving all old recovery/publication obligations |
 
-The model checking target includes unique outcome, no visible undecided effect, publication closure, serializability of gate-protected operations, stable final result, fencing and retention. The simulator must preserve independent local journal and consensus durability events so it can detect mistaken conflation of those boundaries.
+The model checking target includes unique outcome, no visible undecided effect, publication closure, serializability of gate-protected operations, stable final result, fencing and retention. SPEC-010 FM-2 requires model checking plus passing deterministic simulation and real-process fault campaign before a distributed C4/C5 correctness claim; authority/plan evolution also requires FM-3. The simulator must preserve independent local journal and consensus durability events so it can detect mistaken conflation of those boundaries.
 
 Liveness is conditional on eventual communication, available required quorums/storage, fair scheduling and resolution of preceding reservations. Availability, starvation and useful successful operations must be measured separately from safety.
 
@@ -598,9 +626,9 @@ Liveness is conditional on eventual communication, available required quorums/st
 | Milestone | Deliverable | Exit criterion |
 |---|---|---|
 | C5-A | Deterministic single-IDC executor and explicit ordered/result records | C5-001/017 pass against the sequential model |
-| C5-B | Fixed three-node consensus authority and storage adapter | C5-009/010/018 pass with independent durability faults |
+| C5-B | SPEC-011/012/013 integration, fixed three-node consensus authority and storage adapter | C5-009/010/018/021/022/024 pass with independent durability faults |
 | C5-C | Multi-shard prepare/unique decision recovery | C5-003/005/006 pass; no heuristic abort path exists |
-| C5-D | Publication layer and coherent read cuts | C5-007/008/019 pass under arbitrary install delays |
+| C5-D | Publication layer and coherent read cuts | FM-2 model/simulator/real-process gates and C5-007/008/019/023 pass under arbitrary install delays |
 | C5-E | Composite gates and mixed-class integration | C5-002/004/012/015/020 pass |
 | C5-F | SPEC-009 evolution and retention | C5-011/013/014/016 pass or unsupported reconfiguration fails closed |
 | C5-G | Baseline evaluation | Publish equivalent-contract latency, throughput, queueing, failure availability and coordination costs |
@@ -621,6 +649,6 @@ The first serial milestone corresponds to SPEC-001 M6; composite/publication beh
 | SPEC-002 §§88–89, 105–109 — GC and generation drain | §§16–17 |
 | Proposal §1; prior-art notes on composition, observations and evolution | §§1–2, 11–17, 20 |
 
-This draft deliberately strengthens unspecified interfaces without rewriting SPEC-001 or SPEC-002: local MVCC visibility is additionally gated by distributed publication; serial fallback requires a valid executable sequential contract; and old final outcomes remain recoverable after their admission generation closes.
+This draft refines SPEC-001 and SPEC-002 consistently: local MVCC visibility is additionally gated by distributed publication; serial fallback requires a valid executable sequential contract; and old final outcomes remain recoverable after their admission generation closes. SPEC-011 owns registry authority, SPEC-012 owns identity/encoding/client contracts and SPEC-013 owns trust; none removes the installation/publication/completion gates defined here.
 
 Research context is taken from the repository's [proposal](../PROPOSTA-DE-PESQUISA.md) and [prior-art notes](../research/consistency-prior-art.md). The design above is a proposed baseline and proof obligation, not a new theorem or a benchmark result.

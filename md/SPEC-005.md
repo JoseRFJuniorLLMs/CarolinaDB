@@ -1,10 +1,11 @@
 # SPEC-005 — C1/C2 Runtime
 
 **Subtitle:** Semantic Replication, Idempotent Application and Causal Observations  
-**Status:** Draft 0.1 — proposed implementation contract; unimplemented and unverified  
+**Status:** Draft 0.2 — proposed implementation contract; unimplemented and unverified  
 **Date:** 2026-09-09  
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md)  
 **Integrates with:** [SPEC-006](SPEC-006.md), [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)  
+**Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog, typed identity and authority), [SPEC-012](SPEC-012.md) (request identity, client protocol and codecs), [SPEC-013](SPEC-013.md) (security and trust)  
 **Reference implementation:** Rust stable; initially modules within `astra-runtime`  
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY state requirements of this draft.
 
@@ -16,11 +17,13 @@ The local `CompiledBatch` of SPEC-002 remains the durability boundary. The recei
 
 The MVP uses one fixed three-node, fully replicated replication group per supported domain and one local storage boundary for each operation. Physical sharding, partial replication, cross-group atomic operations and online membership changes are outside this protocol's first milestone. Such operations MUST use a separately admitted composition plan, normally SPEC-008. An IDC and a replication group remain distinct concepts even when their MVP placement happens to coincide.
 
+C2 v1 session guarantees are scoped to one replication group. Read-your-writes, monotonic reads and causal dependencies across groups require a separately qualified composite contract and plan. Several group tokens collected by an SDK do not establish that contract. The compiler MUST reject a cross-group session requirement on this template, even when each individual operation otherwise qualifies for C2.
+
 This specification supplies proof obligations and acceptance scenarios. It does not establish a theorem, report a completed implementation, guarantee bounded convergence time or claim a new CRDT algorithm.
 
 ## 2. Admission obligations
 
-The runtime MUST load an immutable plan and validate its hashes, operation version, IDC generations, permitted participants and protocol capabilities before admitting a new operation. The class label alone is insufficient.
+The runtime MUST load an immutable plan and validate its hashes, operation version, each typed `IdcBinding`, permitted participants and protocol capabilities against SPEC-011 admission evidence before admitting a new operation. The class label alone is insufficient. A stale catalog cache, placement address or larger unrelated generation cannot confer authority.
 
 | Path | Required evidence in the admitted plan |
 |---|---|
@@ -34,19 +37,19 @@ If admission evidence is missing, the runtime MUST reject the path. It MAY route
 
 ## 3. Identity and semantic records
 
-The following are logical types, not Rust memory images or a finalized binary ABI. Identifier and scalar encodings SHALL use the canonical codecs defined by the IR/storage specifications. The wire protocol and snapshot format each carry an independent version. A version-1 conformance fixture MUST fix field order, discriminants, byte order, lengths and hash inputs before interoperability is claimed.
+The following are logical types, not Rust memory images or a finalized binary ABI. SPEC-011 owns identity types; SPEC-003 owns canonical IR; SPEC-012 owns wire, snapshot, receipt and token codecs, negotiation and bounded decoding. The wire protocol and snapshot format each carry an independent version. SPEC-012's version-1 conformance fixtures MUST fix field order, discriminants, byte order, lengths and hash inputs before interoperability is claimed.
 
 ```rust
 struct OriginId {                 // exactly the SPEC-002 identity
     node_id: NodeId,
-    origin_epoch: u64,
+    origin_epoch: OriginEpoch,
     origin_seq: u64,
 }
 
 struct StreamId {
     group: ReplicationGroupId,
     node: NodeId,
-    origin_epoch: u64,
+    origin_epoch: OriginEpoch,
 }
 
 struct Dot { stream: StreamId, sequence: u64 }
@@ -59,7 +62,7 @@ struct StreamCoverage {
 struct CausalContextV1 {
     format_version: u16,
     group: ReplicationGroupId,
-    membership_generation: u64,
+    membership_generation: MembershipGeneration,
     streams: SortedMap<StreamId, StreamCoverage>,
 }
 
@@ -68,29 +71,33 @@ struct SemanticCommitV1 {
     origin: OriginId,
     dot: Dot,
     txn_id: TxnId,
-    request_hash: Hash256,
-    operation_id: OperationId,
-    operation_version: u32,
+    request_key: RequestKey,
+    request_hash: RequestHash,
+    request_home_epoch: RequestHomeEpoch,
+    operation: OperationRef,
+    operation_hash: OperationHash,
     schema_hash: SchemaHash,
-    contract_hash: Hash256,
+    contract_hash: ContractHash,
     plan_hash: PlanHash,
-    plan_generation: u64,
-    idcs: Vec<(IdcId, u64)>,
+    plan_generation: PlanGeneration,
+    idc_bindings: Vec<IdcBinding>,
     class: ConsistencyClass,
     dependencies: CausalContextV1,
     effects: CanonicalNormalizedEffects,
     effects_hash: Hash256,
-    original_outcome: CanonicalOutcome,
+    original_outcome: TerminalOutcome, // exact result bytes/digest and commitments
     durability_policy_id: Hash256,
-    semantic_digest: Hash256,
+    semantic_digest: SemanticDigest,
 }
 ```
 
 `origin_seq` is allocated monotonically for the node's origin epoch. `Dot.sequence` is allocated monotonically for its replication-group stream. The counters have separate namespaces even if an MVP allocates identical values. Allocation and the semantic commit are persisted atomically; a sequence promised by a committed record MUST NOT be reused. Abandoned in-memory reservations do not become causal prerequisites. If an allocator makes durable holes, it MUST also publish explicit authenticated no-effect coverage records; the MVP SHOULD avoid such holes by allocating at commit.
 
-`OriginId` identifies a semantic commit. `TxnId` identifies an invocation execution and binds the immutable request hash. `Dot` addresses dependency coverage. An origin epoch changes when its identity could otherwise be reused after destructive restore or replacement. It is different from `StorageEpoch`, plan generation, membership generation and escrow authority epoch.
+`OriginId` identifies a semantic commit. `RequestKey = (TenantId, RequestNamespace, StableRequestId)` identifies the client invocation; `TxnId` identifies its one mapped execution. `Dot` addresses dependency coverage. An `OriginEpoch` changes when its identity could otherwise be reused after destructive restore or replacement. It is different from `StorageEpoch`, `PlanGeneration`, `MembershipGeneration`, `IdcGeneration`, `IdcAuthorityEpoch`, `ResourceGeneration`, `EscrowEpoch` and `HolderAuthorityEpoch`. `IdcBinding` contains exactly `idc_id: IdcId`, `idc_generation: IdcGeneration` and `authority_epoch: IdcAuthorityEpoch`; no bare integer substitutes for any of these fields.
 
-Every new invocation SHALL have one stable `RequestHome` chosen by the catalog's deterministic routing of its tenant and `TxnId`. Only that home may originate its first decision; concurrent duplicates serialize on its durable transaction-status key. Other nodes may resolve already replicated outcomes or forward the unchanged request. They MUST NOT originate another execution when the home is unreachable. Moving a request home requires a SPEC-009 fence and transfer of all retained outcomes and in-flight identities. C1 permits independent operations at multiple homes; it does not solve global idempotency for simultaneous retries by ignoring ownership. A request-home epoch is routing authority, not a timestamp. This conservative MVP may lose availability for a particular request during home failure even while other homes continue.
+Every new invocation SHALL route to `RequestHome = route(RequestKey)` before allocation of `TxnId`, as defined in SPEC-012. The authenticated home performs one durable CAS from absent to `(RequestKey, globally unique TxnId, immutable request_hash)` before any runtime decision or effects. Concurrent first submissions with matching hashes join that mapping; changed content returns `RequestIdentityMismatch`. An allocated candidate that loses CAS cannot originate an execution. The hash binds the canonical operation/schema/contract identity, arguments, read contract and initial session input; it excludes plan choice and mutable routes.
+
+Only that home may bind the execution authority and originate its first decision. Other nodes may resolve authenticated retained outcomes or forward the unchanged request; they MUST NOT originate another execution when the home or its mapping is unresolved. Moving a request home requires SPEC-011 registry authorization and a SPEC-009 fence/transfer of all retained mappings, outcomes and in-flight identities. `RequestHomeEpoch` is routing authority, not a timestamp or permission to allocate a second `TxnId`. C1 permits independent operations at multiple homes; this conservative MVP may lose availability for one request during home failure while other homes continue.
 
 Replication relays MUST preserve the original origin, transaction, dot, effect bytes and digest. Relaying or locally replaying a record never produces a new origin. A duplicate identity with different canonical contents is an integrity fault, not a last-writer-wins update. Persisted digests detect identity conflicts; hashes alone do not authenticate a peer or prove semantic correctness.
 
@@ -106,12 +113,12 @@ The runtime SHALL configure finite limits for record bytes, context streams, int
 
 For a new C1/C2 invocation:
 
-1. Authenticate the caller and check permission for the named operation. Resolve the stable `TxnId` and `request_hash`; return the recorded outcome for a matching terminal request, and reject a hash mismatch.
+1. Authenticate and authorize the tenant, request namespace and named operation under SPEC-013. Resolve or durably create SPEC-012's `RequestKey -> (TxnId, request_hash)` mapping at its home; return the retained `FinalReceiptV1` for a matching terminal request and reject changed request content.
 2. Validate plan admission and the current local fence. Pin the exact plan and retain it through commit.
-3. Join the client session context with the dependencies demanded by the operation. Wait for local applied coverage. A C1 plan that cannot preserve the requested session contract MUST be rejected or routed to a compatible path; C1 is not permission to drop session dependencies.
+3. Verify tenant, group, membership interpretation and token integrity before joining the client session context with operation dependencies. All v1 contexts must name the same group. Wait for local applied coverage. A C1 plan that cannot preserve the requested session contract MUST be rejected or routed to a compatible path; C1 is not permission to drop session dependencies.
 4. Choose a durable local snapshot after the wait. Read prerequisite and return-driving values only from that snapshot. Record its required causal context. Validate arguments and generate deterministic normalized effects exactly once for this invocation.
 5. Acquire short local application guards over affected keys and relevant protocol keys in canonical order. Recheck plan/fence and the preconditions required at commit. Rebase commutative deltas on the current committed state under these guards; do not overwrite it with a stale snapshot's computed value.
-6. Allocate origin and dot. Commit business mutations, local index changes, origin/transaction deduplication, immutable outcome, applied context and semantic outbox record as one `CompiledBatch`.
+6. Allocate origin and dot. Commit business mutations, local index changes, the complete request/operation/plan/IDC binding, origin/transaction deduplication, immutable `TerminalOutcome`, applied context and semantic outbox record as one SPEC-002 `CompiledBatch`. Its typed status record must retain exact result bytes/digest and issued commitments; a later independent dedupe/result write is forbidden.
 7. Cross the configured local durable journal boundary. Publish all local effects and metadata together, release guards and advertise the immutable record to peers.
 8. Return the final receipt only when its declared durability policy is satisfied. A matching retry returns the same outcome; it does not regenerate effects or recompute a newer return value.
 
@@ -142,7 +149,7 @@ Application SHALL:
 2. Wait until local applied context covers dependencies. A durable receipt acknowledgment is not applied coverage and cannot satisfy a causal read.
 3. Acquire local guards for all affected user, index and deduplication keys. Re-read the applied identity while guarded. Validate current protocol state against the pinned historical interpretation.
 4. Apply the immutable semantic effects against current local materialization. Do not execute application code, re-run its business choice, generate IDs or consult local time/randomness.
-5. Construct one local `CompiledBatch` containing the resulting business/index mutations; origin digest and transaction outcome; dot coverage; inbox applied marker; and any outgoing relay cursor required for correctness.
+5. Construct one local `CompiledBatch` retaining the original request key/hash, transaction, operation/schema/contract/plan identities and IDC bindings; resulting business/index mutations; origin digest and exact terminal outcome; dot coverage; inbox applied marker; and any outgoing relay cursor required for correctness. Replica-local batch identity does not replace the original invocation identity or result.
 6. Commit through SPEC-002. Assign a fresh local `VersionStamp` and journal position. Advance applied acknowledgments only after durable publication of the complete batch.
 
 If two ready effects read the same counter concurrently, guards or an equivalent validated atomic-update primitive MUST ensure the resulting value includes both deltas. A separate dedupe write after business state is forbidden. A duplicate that arrives during application MUST join the same completion or observe its durable outcome; it cannot start another mutation.
@@ -154,9 +161,10 @@ The protocol guarantees one logical application within the declared identity-ret
 ```rust
 struct SessionTokenV1 {
     version: u16,
-    contract_hash: Hash256,
+    tenant_id: TenantId,
+    contract_hash: ContractHash,
     context: CausalContextV1,
-    catalog_generation: u64,
+    catalog_generation: CatalogGeneration,
     token_id: Hash256,
 }
 
@@ -169,9 +177,11 @@ struct CausalObservationV1<T> {
 }
 ```
 
-Session tokens MUST be integrity protected and tenant/group scoped, or validated against server-held session state. A client may request additional waiting but cannot manufacture authorization, satisfied prerequisites or proof of a commit by supplying a token. Explicit application arguments remain distinct from authenticated observations.
+This is the logical group-context payload of SPEC-012's authenticated token envelope; SPEC-013 owns protection keys, issuer validation and rotation. Session tokens MUST be integrity protected and tenant/group scoped, or validated against server-held session state. A client may request additional waiting but cannot manufacture authorization, satisfied prerequisites or proof of a commit by supplying a token. Explicit application arguments remain distinct from authenticated observations.
 
-For `READ AT CAUSAL(token)`, the server MUST wait until applied state covers the token, then choose a snapshot whose atomically captured context also covers it. Reading first and attaching a later frontier is forbidden. The result carries that snapshot's context; the client joins it with its prior token. This implements monotonic reads and read-your-writes across node changes when the required effects are reachable. Concurrent unrelated effects may become visible, and independent chains are not globally ordered.
+`covers` and `join` reject different groups or membership interpretations without a certified SPEC-009 mapping. Reusing a G1 token at G2 returns `SessionScopeMismatch`, with no effect or false coverage. Opening an explicitly independent G2 session is permitted but does not carry G1 guarantees. A G1 write followed by a G2 write and G3 read has no cross-group read-your-writes, monotonic-read or causal guarantee under C2 v1. The same restriction applies to operation prerequisites and emitted contexts, not just public reads.
+
+For `READ AT CAUSAL(token)`, the server MUST wait until applied state covers the token, then choose a snapshot whose atomically captured context also covers it. Reading first and attaching a later frontier is forbidden. The result carries that snapshot's context; the client joins it with its prior token within that same group. This implements monotonic reads and read-your-writes across node changes within the group when the required effects are reachable. Concurrent unrelated effects may become visible, and independent chains are not globally ordered.
 
 Default session reads SHALL retain session guarantees. Explicit `AT LOCAL` permits a fresh local observation with its actual context, but MUST NOT silently erase the existing session token or claim it was satisfied. A query that requests an exact current global value, a multidomain consistent snapshot or a final business authorization MUST use a separately verified read/operation plan.
 
@@ -181,7 +191,7 @@ On an unavailable dependency the runtime waits within configured bounds and retu
 
 ## 8. Transport, acknowledgments and anti-entropy
 
-Version-1 messages SHALL include `Hello`, `Inventory`, `FetchMissing`, `CommitDelivery`, `ReceivedDurable`, `AppliedDurable`, `SnapshotOffer` and typed error responses. Each message binds group, membership generation, sender identity and format version. Mutating messages require an authenticated, authorized peer channel. Malformed or unsupported mandatory semantics fail closed.
+Version-1 messages SHALL include `Hello`, `Inventory`, `FetchMissing`, `CommitDelivery`, `ReceivedDurable`, `AppliedDurable`, `SnapshotOffer` and typed error responses encoded and negotiated under SPEC-012. Each message binds cluster, tenant, group, typed membership generation, sender identity and format version. SPEC-013 peer authentication/authorization and SPEC-011 authority evidence are required independently of content hashes. Malformed or unsupported mandatory semantics and prohibited codec downgrades fail closed.
 
 `Inventory` describes exact retained origin/dot coverage, applied coverage and snapshot coverage. It may use digests to find mismatches, but a digest mismatch requires exact reconciliation; absence of a mismatch is not an authority grant. Peers request missing records by bounded origin/dot ranges. Delivery is at least once. Retries preserve bytes and IDs. Separate per-peer cursors track received durability and applied durability.
 
@@ -212,7 +222,8 @@ A bootstrap snapshot SHALL be a complete, causally closed logical image for the 
 snapshot_format_version; group; membership_generation
 source snapshot identity; schema/plan artifacts and hashes
 business/index image; applied causal context
-origin and transaction identity/outcome state
+RequestKey-to-TxnId mappings or pinned authoritative mapping references
+origin and transaction identity/exact outcome/commitment state
 retired-origin floors and replay tombstones
 protocol metadata required by the participating classes
 retained in-flight inbox/outbox state or explicit replay boundary
@@ -253,7 +264,7 @@ any state -> FENCED / READ_ONLY_SAFETY / QUARANTINED
 
 ## 13. Errors, backpressure and observability
 
-Errors SHALL distinguish `StalePlan`, `StaleSchema`, `StaleGeneration`, `FencedOrigin`, `UnknownPlan`, `UnsupportedWireVersion`, `IdentityConflict`, `IdentityExpired`, `DependencyUnavailable`, `DependencyLimit`, `QueueFull`, `OutcomeUnknown`, `NotReady`, `Corruption`, `DiskFull` and `ReadOnly`. Error payloads bind identity, stage and whether local commit is known committed, known absent or unresolved. Retry guidance MUST preserve the original request ID and hash whenever outcome could exist.
+Errors SHALL distinguish `StalePlan`, `StaleSchema`, `StaleGeneration`, `FencedOrigin`, `UnknownPlan`, `UnsupportedWireVersion`, `RequestIdentityMismatch`, `IdentityConflict`, `IdentityExpired`, `SessionScopeMismatch`, `DependencyUnavailable`, `DependencyLimit`, `QueueFull`, `OutcomeUnknown`, `NotReady`, `Corruption`, `DiskFull` and `ReadOnly`. `RequestIdentityMismatch` is the SPEC-012 client outcome for changed content under one request key; `IdentityConflict` also covers conflicting internal origin/dot records. Error payloads bind identity, stage and whether local commit is known committed, known absent or unresolved. Retry/resolve guidance MUST preserve the original `RequestKey` and request hash whenever outcome could exist, including when the client has not received its mapped `TxnId`.
 
 The runtime MUST expose durable received/applied lag, missing dependency count, causal wait duration, inbox/outbox bytes, duplicate deliveries, identity conflicts, context intervals, replication bytes, snapshot pins, GC blocking reasons, outcome retention, readiness and active generations. Traces bind `TxnId`, `OriginId`, dot, plan hash, group, local version and phase. Business values and authorization secrets MUST NOT be logged by default. High-cardinality identity detail belongs in bounded diagnostic views, not unrestricted metric labels.
 
@@ -280,14 +291,18 @@ Every scenario SHALL check an independent reference history and the contract's r
 | C12-013 | Saturate context/inbox limits and inject disk full/fsync errors | Typed backpressure; no premature success, dropped obligations or partial batch |
 | C12-014 | Promote a lagging replica; present a prior session token and escrow metadata snapshot | Causal read waits/fails truthfully; no implicit spend authority |
 | C12-015 | Compile bounded concurrent decrement or global `increment_and_get` through C1 | Admission rejected unless an explicit matching proof/contract exists |
+| C12-016 | Concurrent first submissions of one RequestKey at different ingress nodes; crash before/after home CAS | One recoverable mapping and at most one execution; retry without known TxnId resolves the same exact receipt |
+| C12-017 | Write G1; supply its token to G2/G3 or compile a cross-group RYW/monotonic/causal contract | Typed scope rejection before effects unless a separately qualified composite plan owns the full requirement; no token truncation or implicit cross-group coverage |
+| C12-018 | Reuse one request key with changed canonical arguments/contract/session input; replay its old receipt after migration | RequestIdentityMismatch for changed content; matching retries retain original result and commitments |
+| C12-019 | Forge a token/peer identity or replay records with an IDC generation substituted for authority epoch; negotiate unknown mandatory codecs | Authentication, typed-binding or compatibility validation rejects before apply; hashes and numeric equality confer no authority |
 
 ## 15. Milestones and traceability
 
 | Gate | Deliverable and exit criterion |
 |---|---|
-| R0 | Freeze wire/context fixtures and a slow dot-set reference model; C12-003/005 pass |
+| R0 | SPEC-011/012/013 contracts available; freeze wire/context fixtures and a slow dot-set reference model; C12-003/005/019 pass |
 | R1 | Semantic outbox/inbox and atomic deduplicating apply atop SPEC-002 integrated recovery; C12-001/002/008 pass |
-| R2 | Causal scheduler, authenticated sessions and snapshot-context capture; C12-004/006/007/015 pass |
+| R2 | Causal scheduler, authenticated group sessions, request-home CAS and snapshot-context capture; C12-004/006/007/015–018 pass |
 | R3 | Bootstrap, retention and bounded resource handling; C12-009/010/011/013 pass |
 | R4 | Generation/failover integration and complete fault qualification; C12-012/014 plus all preceding tests pass before a distributed-correctness claim |
 

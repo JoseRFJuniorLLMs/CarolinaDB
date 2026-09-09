@@ -1,3077 +1,590 @@
 # SPEC-001 — Invariant-Compiled Consistency
 
-**Status:** Draft 0.1  
+**Status:** Draft 0.2 — proposed architecture; implementation, qualification and research proof remain open  
+**Date:** 2026-09-09  
 **Type:** Foundational architecture specification  
-**Scope:** language semantics, invariant compiler, coordination planner, transaction runtime, replication, certification, recovery, verification and benchmarks  
-**Reference implementation:** Rust stable  
-**Project codename:** intentionally undefined  
-**Normative terms:** MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are used in the RFC sense.
-
----
+**Scope:** observable contracts, conservative compilation, protocol composition, authority, evolution and qualification  
+**Reference implementation:** Rust stable; conceptual records do not freeze a Rust or wire ABI  
+**Project:** CarolinaDB; earlier research documents and canonical hash domains retain the historical `astra` name  
+**Normative terms:** MUST, MUST NOT, SHOULD and MAY express requirements, not implemented capabilities.
 
 ## 0. Thesis
 
-This system is a database in which **consistency is compiled from application invariants and operation semantics**.
+CarolinaDB is a proposed database runtime that compiles **versioned observable operation contracts** into execution plans. Contracts declare invariants, permitted effects, reads, results, atomicity, authority, durability and behavior during unavailable communication.
 
-The developer does not begin by choosing:
+> The compiler selects safe execution plans from a finite, versioned, qualified protocol-template library and optimizes a declared cost function among proven-compatible candidates under explicit assumptions. No globally weakest protocol, total ordering of protocol families, or complete decision procedure is claimed.
 
-- `READ COMMITTED`;
-- `SNAPSHOT ISOLATION`;
-- `SERIALIZABLE`;
-- eventual consistency;
-- causal consistency;
-- synchronous replication;
-- a globally strong transaction mode.
-
-Instead, the developer declares:
-
-1. the valid state space;
-2. the invariants that MUST never be violated;
-3. the operations allowed to mutate state;
-4. the effects and preconditions of those operations;
-5. the ordering constraints that are semantically meaningful.
-
-The database compiler determines the **weakest safe coordination protocol** for each operation and each invariant dependency component.
-
-The core transformation is:
+The initial deterministic selection heuristic in [SPEC-004](SPEC-004.md) does not guarantee a global optimum even within every possible combination of that finite library. Any later minimum-cost claim MUST identify the completely searched candidate space and cost model. A cost estimate is not a latency measurement.
 
 ```text
-Schema
-  +
-Invariants
-  +
-Operation Semantics
-  +
-Replication Topology
-  ↓
-Invariant Compiler
-  ↓
-Dependency Hypergraph
-  ↓
-Preservation / Commutativity / Authority Analysis
-  ↓
-Executable Consistency Plan
-  ↓
-Runtime Protocol
+Versioned schema + invariants + operation/observation contracts
+  + topology/authority assumptions + qualified protocol library
+  -> deterministic lowering and conservative semantic closure
+  -> candidate obligations and joint compatibility analysis
+  -> executable plans + evidence + diagnostics
+  -> authorized execution, durable outcomes and admissible observations
+  -> recovery and explicitly qualified plan/contract transitions
 ```
 
-The research claim is not that weak consistency is new.
+The candidate scientific contribution is **observable refinement when heterogeneous safe plans compose, transfer authority, evolve and recover from failure**. Generic consistency selection, escrow and operation dependency analysis are predecessors and engineering building blocks. Novelty and the general refinement result remain to be demonstrated against the [proposal](../PROPOSTA-DE-PESQUISA.md) and [prior-art analysis](../research/consistency-prior-art.md).
 
-The research claim is:
-
-> **A DBMS can treat coordination strategy as compiled execution machinery derived from declared correctness properties, rather than as a database-wide isolation mode selected manually by the application developer.**
-
----
+This document owns the architectural thesis. SPEC-003 owns language/IR semantics; SPEC-004 compiler selection; SPEC-002 durable storage; SPEC-005–008 protocols; SPEC-009 evolution; SPEC-010 qualification; SPEC-011 catalog/authority and identifier taxonomy; SPEC-012 request/client/encoding contracts; SPEC-013 security; SPEC-014 implementation sequencing. Examples here are explanatory summaries, not alternate definitions of those owners. An unresolved contradiction is a specification defect and blocks the affected capability.
 
 # 1. Problem statement
 
-Distributed databases traditionally expose consistency through system-level abstractions.
+An invariant over rows does not fully describe an application's correctness. Two implementations may both keep stock nonnegative while returning different confirmations, exposing different read states or losing different acknowledged requests after a crash.
 
-Examples:
+Over-coordination and under-coordination must therefore be judged against the **same full observable contract**. A receipt for a grow-only fact can admit executions that an exact current-global-value result cannot. Two replicas seeing stock 1 cannot both confirm sale 1 unless their confirmations are backed by a valid exclusive resource decomposition or shared coordination. Convergence to stock -1 is still invalid.
 
-```text
-isolation level
-replication mode
-quorum size
-leader placement
-transaction boundary
-serializable / eventual choice
-```
-
-These mechanisms describe **how the database coordinates**.
-
-They do not directly describe **what the application must preserve**.
-
-This causes two symmetric failures.
-
-## 1.1 Over-coordination
-
-Applications often use strong coordination where it is unnecessary.
-
-Example:
-
-```text
-likes = likes + 1
-```
-
-If the invariant is merely:
-
-```text
-likes >= 0
-```
-
-concurrent increments do not require a total order.
-
-A serializable transaction can preserve correctness, but it is stronger than necessary.
-
----
-
-## 1.2 Under-coordination
-
-Applications weaken consistency for latency or availability without an explicit proof that the resulting executions preserve business invariants.
-
-Example:
-
-```text
-stock >= 0
-```
-
-Two disconnected replicas each see:
-
-```text
-stock = 1
-```
-
-and independently sell the final item.
-
-The replicas may converge perfectly to:
-
-```text
-stock = -1
-```
-
-Convergence is not correctness.
-
----
+Isolation may already be chosen per transaction in existing systems; a new per-operation flag is not the research contribution. The question is whether a restricted contract can generate useful, composable, verifiable plans with fewer application-written protocol mechanisms.
 
 # 2. Design objective
 
-The DBMS MUST make the following question machine-checkable:
+For a closed operation set, invariant set, observable contract, topology and failure model, the compiler MUST determine which **supported candidate plans** satisfy all applicable obligations. It then selects compatible plans using SPEC-004's declared cost policy.
 
-> Given invariant set `I`, operation set `O`, state `S`, topology `T` and concurrent execution relation `C`, what is the minimum coordination required to guarantee that every committed reachable state satisfies `I`?
+C0 LOCAL, C1 COMMUTATIVE, C2 CAUSAL, C3 ESCROW, C4 CERTIFIED and C5 SERIAL name protocol families. They are not a cost ladder, a semantic total order or a mathematical lattice. Family labels never replace an execution profile or its proof obligations.
 
-The system MUST prefer less coordination only when it can justify that choice.
-
-When a weaker execution strategy cannot be proven safe, the compiler MUST fall back to a stronger strategy.
-
-The safe fallback chain is:
-
-```text
-C0 LOCAL
-   ↓
-C1 COMMUTATIVE
-   ↓
-C2 CAUSAL
-   ↓
-C3 ESCROW
-   ↓
-C4 CERTIFIED
-   ↓
-C5 SERIAL
-```
-
-This ordering expresses increasing coordination cost, not semantic superiority.
-
----
+An unproven candidate is rejected. The compiler may select an independently safe alternative, including qualified C5, or return `NoSafePlan`. Unsupported semantics and invalid sequential operations cannot be repaired merely by serialization. At runtime an invalidated assumption yields the plan's permitted non-success outcome or a fully qualified transition; it cannot silently alter the contract.
 
 # 3. Non-goals
 
-This project is NOT intended to be:
+The initial experiment excludes unrestricted application code, unrestricted SQL mutation, external side effects, automatic business-rule inference, Byzantine consensus, automatic elastic scaling and hardware-specific acceleration. It does not replace EVA's NietzscheDB backend or the established HeraclitusDB services.
 
-- another PostgreSQL clone;
-- another distributed SQL database;
-- another HTAP platform;
-- another vector database;
-- another graph database;
-- another lakehouse;
-- another event store;
-- another CRDT library;
-- another workflow engine;
-- another "database for agents";
-- a database whose primary novelty is LLM integration;
-- a rewrite of HeraclitusDB;
-- a rewrite of NietzscheDB.
-
-SQL MAY exist as a read/query compatibility layer.
-
-The mutation model MUST NOT be defined primarily as unrestricted SQL updates.
-
----
+SQL read compatibility MAY be added through explicit observation contracts. A new storage engine or commercial database category is not an assumed scientific requirement; the native/runtime-over-existing-storage comparison remains mandatory research work.
 
 # 4. Relation to prior work
 
-This specification deliberately builds on known research rather than pretending the problem appeared yesterday.
+The [prior-art analysis](../research/consistency-prior-art.md) is the maintained literature account, including primary sources and their limitations. The architecture MUST NOT claim novelty solely from capabilities already covered by that account.
 
 ## 4.1 Invariant Confluence
 
-Bailis et al., *Coordination Avoidance in Database Systems*, PVLDB 2014/2015, formalized **I-confluence**: when application transactions and invariants permit coordination-free execution while preserving correctness.
-
-Reference:
-
-https://www.vldb.org/pvldb/vol8/p185-bailis.pdf
-
-This project adopts the central lesson:
-
-> application-level invariants are the correct abstraction for deciding when coordination is necessary.
-
-But this project MUST go beyond a proof-of-concept analysis by making the result a first-class DBMS compilation artifact that controls routing, replication, escrow, certification, failover and runtime execution.
-
----
+Use the reachable-state, operation and merge assumptions of the referenced model when applying invariant-confluence reasoning. Preserving invariants under merge is not by itself a theorem about all returned values, authority changes or observation contracts.
 
 ## 4.2 RedBlue consistency
 
-Li et al., OSDI 2012, classified operations into strongly coordinated red operations and weakly coordinated blue operations, including generator/shadow decomposition.
-
-Reference:
-
-https://www.usenix.org/conference/osdi12/technical-sessions/presentation/li
-
-This project generalizes the binary red/blue distinction into a compiled protocol lattice and does not require the developer to manually assign operations to the final consistency class.
-
----
+Red/blue operation classification is a predecessor. CarolinaDB's finite collection of profiles does not establish a new ordering or lattice by extending the number of labels.
 
 ## 4.3 Fine-grained consistency / PoR
 
-Fine-grained consistency research demonstrated that consistency restrictions can be assigned more selectively than one global mode.
-
-Reference:
-
-https://www.usenix.org/conference/atc18/presentation/li-cheng
-
-This project treats those choices as compilation targets, not user-facing configuration primitives.
-
----
+Selective ordering and directed dependencies are antecedents. SIEVE, Quelea, Indigo and Hamsaz also constrain any novelty claim based on automatic classification, declarative contracts, reservations, return values or protocol synthesis.
 
 ## 4.4 LoRe
 
-LoRe verifies developer-supplied safety properties for local-first software and selectively introduces strong coordination for interactions that can violate invariants.
-
-Reference:
-
-https://arxiv.org/abs/2304.07133
-
-LoRe is a major conceptual predecessor.
-
-This system differs in intended scope:
-
-```text
-LoRe:
-programming model / local-first application verification
-
-SPEC-001:
-general DBMS runtime whose transaction, replication,
-partitioning and recovery protocols are generated from
-the verified invariant/operation model
-```
-
----
+Verified safety and selective coordination in a restricted programming model are antecedents, not inventions of this project. A DBMS implementation must demonstrate an additional useful result instead of relying on a difference in packaging.
 
 ## 4.5 Event Horizon / Semi-Linearizability
 
-CIDR 2026 work on Semi-Linearizability shows that asymmetric dependencies between operations can avoid unnecessary ordering even in mixed-consistency systems.
-
-Reference:
-
-https://www.vldb.org/cidrdb/2026/event-horizon-asymmetric-dependencies-for-fast-geo-distributed-operations.html
-
-The compiler defined here MUST model **directed semantic dependencies**, not merely symmetric conflict.
-
-This means:
-
-```text
-A depends on B
-```
-
-does NOT imply:
-
-```text
-B depends on A
-```
-
----
+The prior-art account identifies asymmetric dependencies and a cost-directed synthesis agenda in Event Horizon. It also includes semantic evolution work. The proposed composition/evolution result therefore needs a precise construction and comparison, not a general claim that combining these subjects is new.
 
 # 5. Novelty requirement
 
-A useful implementation is not automatically a research contribution.
+The research target is a scoped rule/construction such that, for supported contracts and explicit failure assumptions, histories of composed plans and their authority/contract transitions refine the permitted observable histories. Already-issued final commitments must remain explainable after recovery and evolution.
 
-For this project to justify a new DBMS rather than a PostgreSQL extension, the implementation MUST eventually demonstrate all of the following:
+Required evidence includes a precise accepted fragment, formal statements and assumptions, checked protocol models, an implementation correspondence argument, independent observable-history checking and equivalent-contract experiments. A literature comparison MUST distinguish a new result from reproduction of known techniques.
 
-1. **Invariant-aware mutation language**
-2. **Automatic operation-effect extraction**
-3. **Static invariant preservation analysis**
-4. **Automatic consistency-class derivation**
-5. **Directed operation dependency analysis**
-6. **Escrow synthesis for eligible bounded invariants**
-7. **Runtime certification generated from the invariant model**
-8. **Per-operation coordination rather than database-wide isolation**
-9. **Consistency partitioning independent from physical sharding**
-10. **Safe dynamic plan upgrades when runtime conditions invalidate a weaker plan**
-11. **Machine-readable proof/explanation of why an operation may execute under a given consistency class**
-12. **Fail-safe fallback to stronger coordination when proof is incomplete**
-
-If the final implementation merely maps annotations to pre-existing transaction modes, the project has failed its research objective.
-
----
+Deterministic semantic lowering and conservative dependency extraction from **declared versioned operation contracts** are required engineering capabilities. No automatic extraction of arbitrary application-code effects is promised. A correct implementation may still fail to establish scientific novelty or the need for a new DBMS.
 
 # 6. Fundamental abstraction: Invariant Dependency Component
 
-The fundamental unit of consistency is the:
+An Invariant Dependency Component (IDC) is a conservative semantic closure of interacting data, operations, invariants, observations and authority requirements. Finding the smallest useful closure is a precision objective, not an assumed complete analysis.
 
-```text
-Invariant Dependency Component
-```
-
-abbreviated:
-
-```text
-IDC
-```
-
-An IDC is the smallest connected semantic component containing state, operations and invariants whose correctness may interact.
-
-Physical partitioning and consistency partitioning are explicitly separate:
-
-```text
-PHYSICAL SHARD
-      !=
-INVARIANT DEPENDENCY COMPONENT
-```
-
-A single shard MAY contain multiple IDCs.
-
-A single IDC MAY span multiple shards.
-
-Example:
-
-```text
-Shard 1
- ├─ Customer[1]
- ├─ Customer[2]
- └─ Account[9]
-
-Shard 2
- ├─ Payment[44]
- └─ Ledger[7]
-```
-
-An invariant:
-
-```text
-Account[9].balance + Ledger[7].reserved >= 0
-```
-
-creates one IDC spanning both shards.
-
----
+IDCs and physical shards are distinct. One IDC may span shards; one shard may host several IDCs. A transfer may instantiate multiple parameterized IDCs with a qualified composite atomicity obligation instead of permanently merging every account into one global component. Unknown overlap widens the closure or prevents compilation.
 
 # 7. Programming model
 
-The minimum language contains:
+The accepted language is the restricted DSL of SPEC-003: `RECORD`, `INDEX`, `INVARIANT` and versioned `OPERATION`. Operations explicitly declare `REQUIRE`, `READ`, `EFFECT`, `ENSURE`, `RETURN` and `CONTRACT`. Pure deterministic evaluation and a closed operation set are mandatory.
 
-```text
-RECORD
-INDEX
-INVARIANT
-OPERATION
-```
-
-Optional later constructs:
-
-```text
-CAPABILITY
-AUTHORITY
-MATERIALIZED
-EVENT
-POLICY
-```
-
----
+All business, maintenance, import, repair and administrative writers touching protected state MUST be represented in the same analysis and admission boundary. Rights and authority records are runtime-owned and inaccessible through ordinary user mutation.
 
 # 8. Record declaration
 
-Example:
-
-```text
-RECORD Account {
-    id: Uuid PRIMARY KEY,
-    owner_id: Uuid,
-    balance: Decimal(18,2),
-    status: AccountStatus
-}
-```
-
-The compiler MUST know:
-
-- field types;
-- primary identity;
-- partitioning key if defined;
-- mutability;
-- uniqueness constraints;
-- numeric domains;
-- references.
-
----
+Records have stable identities, checked field types, exactly one primary key and explicit references/indexes. Numeric precision, missing-record behavior, string comparison and canonical unique-key meaning are defined in SPEC-003; no implicit case folding or mathematical unbounded integer is assumed.
 
 # 9. Invariant declaration
 
-Example:
+Supported shapes include scoped bounds, uniqueness, references, aggregate membership, conservation, monotone facts, state transitions and matching causal prerequisites. Every invariant has an explicit complete scope, deterministic evaluator and version. Initial data MUST satisfy the admitted invariant set before activation.
 
-```text
-INVARIANT account_non_negative {
-    FOR ALL a: Account
-    ASSERT a.balance >= 0
-}
-```
-
-Example:
-
-```text
-INVARIANT unique_email {
-    UNIQUE User.email
-}
-```
-
-Example:
-
-```text
-INVARIANT department_budget {
-    FOR ALL d: Department
-    ASSERT SUM(Expense.amount WHERE Expense.department_id == d.id)
-           <= d.budget
-}
-```
-
-Example:
-
-```text
-INVARIANT shipment_requires_payment {
-    FOR ALL o: Order
-    ASSERT o.shipped == true
-        IMPLIES o.payment_status == CONFIRMED
-}
-```
-
----
+An undeclared business requirement is outside the guarantee. A global invariant cannot be checked by reading arbitrarily stale fragments and calling their union a valid snapshot.
 
 # 10. Mutation model
 
-Safe mutation MUST occur through named operations.
+Mutations invoke immutable named operation versions with canonical arguments and a complete observable contract. Evaluation constructs a private candidate; only the selected protocol's accepted durable decision can authorize final success.
 
-Example:
-
-```text
-OPERATION withdraw(
-    account_id: Uuid,
-    amount: Decimal
-) {
-    REQUIRE amount > 0
-
-    READ
-        Account[account_id].balance
-
-    EFFECT
-        Account[account_id].balance -= amount
-
-    ENSURE
-        Account[account_id].balance >= 0
-}
-```
-
-Example:
-
-```text
-OPERATION deposit(
-    account_id: Uuid,
-    amount: Decimal
-) {
-    REQUIRE amount > 0
-
-    EFFECT
-        Account[account_id].balance += amount
-}
-```
-
-Example:
-
-```text
-OPERATION transfer(
-    source: Uuid,
-    destination: Uuid,
-    amount: Decimal
-) {
-    REQUIRE source != destination
-    REQUIRE amount > 0
-
-    EFFECT {
-        Account[source].balance -= amount
-        Account[destination].balance += amount
-    }
-
-    ENSURE
-        Account[source].balance >= 0
-}
-```
-
----
+A reservation receipt promises the accepted reservation, not the current global free quantity. A business rejection must be justified by the observation and refusal semantics declared in its contract. Failed evaluation changes no business state; a final rejection may still require durable deduplication/result persistence.
 
 # 11. Why unrestricted UPDATE is not the primary mutation primitive
 
-The following statement:
+An unmodeled update can invalidate invariant closure, result semantics or exclusive rights. It MUST NOT bypass compiled admission. No administrator flag may waive a proof obligation while retaining the same correctness claim.
 
-```sql
-UPDATE account
-SET balance = balance - 100
-WHERE id = ?;
-```
-
-does not communicate enough semantics.
-
-The DB sees:
-
-```text
-read
-write
-numeric change
-```
-
-It does not necessarily know:
-
-```text
-this is withdrawal
-this consumes a bounded resource
-this operation has a business precondition
-this decrement can use escrow
-this operation may commute with deposit
-this operation conflicts asymmetrically with account closure
-```
-
-Therefore the safe API MUST privilege semantic operations.
-
-Ad hoc SQL mutation MAY exist under an explicit mode:
-
-```text
-UNCOMPILED_MUTATION
-```
-
-Such mutation MUST default to:
-
-```text
-C5 SERIAL
-```
-
-unless an administrator explicitly accepts weaker semantics.
-
----
+An optional administrative mutation path must be a registered deterministic operation with a complete footprint, observable contract and qualified plan. Conservative C5 is permissible only after all of its validation, authority and composition obligations hold; otherwise reject the mutation.
 
 # 12. Invariant classes
 
-Version 1 MUST recognize a decidable subset.
+The recognized IR categories are `LowerBound`, `UpperBound`, `Unique`, `Referential`, `AggregateUpperBound`, `AggregateLowerBound`, `Conservation`, `Monotonic`, `StateTransition`, `CausalPrerequisite` and `Arbitrary` (SPEC-003).
 
-## 12.1 Local predicate
-
-```text
-x >= 0
-x <= K
-enum(x) in Allowed
-```
-
----
-
-## 12.2 Uniqueness
-
-```text
-UNIQUE R.field
-```
-
----
-
-## 12.3 Referential
-
-```text
-FOREIGN KEY child.parent_id EXISTS parent.id
-```
-
----
-
-## 12.4 Aggregate bound
-
-```text
-SUM(x) <= K
-SUM(x) >= K
-COUNT(x) <= K
-COUNT(x) >= K
-```
-
----
-
-## 12.5 Conservation
-
-```text
-SUM(Account.balance) == Constant
-```
-
-or scoped:
-
-```text
-SUM(Position.quantity WHERE portfolio = P) == P.total
-```
-
----
-
-## 12.6 Monotonic set
-
-```text
-S(t1) subset_of S(t2)
-```
-
----
-
-## 12.7 State transition invariant
-
-```text
-PENDING -> APPROVED -> SETTLED
-```
-
-with forbidden reverse transitions unless explicit compensation exists.
-
----
-
-## 12.8 Causal prerequisite
-
-```text
-B requires A
-```
-
-Example:
-
-```text
-SHIP requires PAYMENT_CONFIRMED
-```
-
----
-
-## 12.9 Arbitrary predicate
-
-```text
-ASSERT custom(...)
-```
-
-Arbitrary predicates are permitted syntactically but MUST initially compile to conservative execution unless a verifier plugin proves a weaker class.
-
----
+Recognition is not eligibility for every protocol. `Arbitrary` means a typed deterministic supported predicate with a complete evaluator; opaque code or nontermination is rejected. An analyzer may be incomplete even when evaluation is supported, permitting independently safe C5 validation. SPEC-014 limits the implemented fragment at each milestone.
 
 # 13. Operation Effect IR
 
-Each operation MUST compile into an architecture-neutral effect representation.
+Effects lower deterministically from declarations into the SPEC-003 effect IR, retaining evaluation order, guard failures, captured reads, exact arithmetic, result dependencies and atomic groups. Normalization MUST preserve accepted and rejected observations, not only final row values.
 
-Initial primitive effects:
-
-```text
-Assign
-Increment
-Decrement
-Insert
-Delete
-AddToSet
-RemoveFromSet
-CompareAndSwap
-Reserve
-Release
-TransferQuantity
-AdvanceState
-EmitFact
-```
-
-Example:
-
-```text
-withdraw(a, n)
-```
-
-becomes:
-
-```text
-EffectIR {
-    op = Decrement
-    target = Account[a].balance
-    amount = n
-}
-```
-
-Example:
-
-```text
-transfer(a, b, n)
-```
-
-becomes:
-
-```text
-EffectIR [
-    TransferQuantity {
-        source = Account[a].balance,
-        destination = Account[b].balance,
-        amount = n
-    }
-]
-```
-
-Normalizing effects is mandatory because the compiler must reason algebraically about operations.
-
----
+Business reserve/release effects are separate from generated escrow authority changes. Accepted replicated effects use a specified semantic handler; replicas do not reevaluate an origin guard against arbitrary local state.
 
 # 14. Invariant IR
 
-Each invariant MUST compile into deterministic IR.
-
-Example:
-
-```text
-InvariantIR {
-    id: 0x7134,
-    kind: LowerBound,
-    domain: Account,
-    field: balance,
-    key_scope: PerPrimaryKey,
-    lower_bound: 0
-}
-```
-
-Example:
-
-```text
-InvariantIR {
-    id: 0x9912,
-    kind: Unique,
-    domain: User,
-    field: email,
-    scope: Global
-}
-```
-
-Example:
-
-```text
-InvariantIR {
-    id: 0xA941,
-    kind: AggregateUpperBound,
-    source: Expense.amount,
-    group_by: Expense.department_id,
-    bound_source: Department.budget
-}
-```
-
-IR MUST be:
-
-- deterministic;
-- serializable;
-- versioned;
-- canonical;
-- hashable;
-- reproducible across architectures.
-
----
+Invariant IR carries stable identity/version, scope, dependencies, predicate and evaluator version. Canonical artifacts must be deterministic, versioned, bounded and hashable according to SPEC-003. Wire/snapshot compatibility belongs to SPEC-012 and physical key/page formats to SPEC-002; neither is implied by canonical IR JSON.
 
 # 15. Compiler pipeline
 
-The compiler MUST implement the following phases.
+The mandatory phases are deterministic parsing/type checking; semantic lowering; complete footprint and invariant closure; parameterized IDC derivation; sequential definedness/preservation; directed concurrency/observation analysis; supported candidate generation; joint compatibility checking; cost-directed selection; and emission of plans, evidence, diagnostics and transition prerequisites.
 
-```text
-1. Parse
-2. Type check
-3. Normalize schema
-4. Normalize invariants
-5. Lower operations to Effect IR
-6. Infer read/write domains
-7. Build invariant-operation dependency graph
-8. Derive IDC components
-9. Analyze monotonicity
-10. Analyze commutativity
-11. Analyze invariant preservation
-12. Analyze directed ordering dependencies
-13. Attempt escrow synthesis
-14. Select consistency class
-15. Build routing plan
-16. Build replication plan
-17. Build certification predicate
-18. Emit executable operation plan
-19. Emit human-readable explanation
-20. Emit machine-verifiable plan digest
-```
-
----
+Analysis includes representation limits and every interacting writer. A budget limit produces explicit failure/unknown; it cannot yield a partly explored closure with a safe label. Compilation is side-effect free; activation is a separate catalog/evolution procedure.
 
 # 16. Dependency hypergraph
 
-The compiler builds:
-
-```text
-G = (D, O, I, E)
-```
-
-Where:
-
-- `D` = data domains;
-- `O` = operations;
-- `I` = invariants;
-- `E` = semantic dependencies.
-
-Example:
-
-```text
-                      stock >= 0
-                          │
-                       Product
-                      /       \
-                   sell      restock
-```
-
-A larger system may look like:
-
-```text
-Customer
-   │
- Order ─── inventory_non_negative ─── Product
-   │
- Payment ─── budget_limit ─────────── Ledger
-   │
- Shipment
-```
-
-Connected components under invariant dependency form candidate IDCs.
-
----
+Graph nodes cover data selectors, operations and invariants. Edges additionally capture absence/membership predicates, result reads, authority, causal facts and atomic groups. Proven key separation may split components; two differently named parameters are not proof of disjointness.
 
 # 17. Directed dependency graph
 
-Read/write conflict is symmetric.
+Semantic edges preserve direction and matching instance/key relations. A payment occurrence required by a shipment is not a requirement to wait for all payments. An invalidating refund adds a new exclusion or validation obligation; observing the earlier payment alone does not resolve that interaction.
 
-Semantic dependency often is not.
-
-Example:
-
-```text
-close_account
-```
-
-may need to observe all withdrawals before completion.
-
-But:
-
-```text
-deposit
-```
-
-may not need to wait for an unrelated profile update.
-
-The compiler MUST be capable of representing:
-
-```text
-A -> B
-```
-
-without implying:
-
-```text
-B -> A
-```
-
-This is necessary to exploit asymmetric ordering opportunities similar to those explored by Semi-Linearizability research.
-
----
+SPEC-004 defines edge kinds and orientation. Directed execution obligations remain distinct from undirected connectivity used to compute conservative closure.
 
 # 18. Consistency classes
 
-## C0 — LOCAL
+| Family | Necessary obligations in addition to the full contract |
+|---|---|
+| C0 LOCAL | Fenced exclusive local authority for the complete affected scope; local serialization/validation and qualified failover. Physical co-location alone is insufficient. |
+| C1 COMMUTATIVE | Accepted-effect algebra, convergence, invariant/result preservation, checked representation and durable identity/deduplication under the exact replication handler. |
+| C2 CAUSAL | Safe unordered concurrency plus complete matching prerequisites, downward-closed visibility and durable session frontiers. v1 guarantees are group-scoped. |
+| C3 ESCROW | Conserved resource decomposition; covered producers/consumers/invalidators; atomic rights/effects/outcomes; qualified transfer and authority recovery. |
+| C4 CERTIFIED | Complete predicates/conflicts, ordered certification authority, durable reservations and qualified prepare/decision/publication. |
+| C5 SERIAL | A durable ordered authority over the complete scope; invariant/guard/result evaluation, fenced alternative writers and atomic publication. |
 
-No distributed coordination.
-
-Requirements:
-
-- affected invariant state is owned locally;
-- no remote dependency;
-- operation preserves invariants locally;
-- failover semantics are covered by replication plan.
-
-Example:
-
-```text
-update_non_unique_profile_field
-```
-
----
-
-## C1 — COMMUTATIVE
-
-Concurrent operations may be reordered without violating relevant invariants.
-
-Required proof:
-
-```text
-f(g(S)) = g(f(S))
-```
-
-or a weaker semantic equivalence accepted by the invariant model.
-
-Examples:
-
-```text
-AddToSet
-Increment(unbounded_counter)
-```
-
-Replication MAY be asynchronous.
-
-Anti-entropy MUST preserve operation identity and idempotence.
-
----
-
-## C2 — CAUSAL
-
-The operation needs partial order, not total order.
-
-Example:
-
-```text
-PaymentConfirmed -> ShipmentCreated
-```
-
-Runtime MUST propagate causal dependencies.
-
-Unrelated causal chains MUST NOT be globally serialized.
-
----
-
-## C3 — ESCROW
-
-Used for decomposable bounded resources.
-
-Example invariant:
-
-```text
-stock >= 0
-```
-
-Global state:
-
-```text
-stock = 1000
-```
-
-Rights allocation:
-
-```text
-Region A = 400
-Region B = 350
-Region C = 250
-```
-
-Each region can consume its local rights without cross-region coordination.
-
-The sum of outstanding rights MUST never exceed globally available capacity.
-
----
-
-## C4 — CERTIFIED
-
-Operations may execute optimistically but commit requires validation by the relevant IDC participants.
-
-Certification MAY check:
-
-- read versions;
-- write intersection;
-- predicate conflicts;
-- invariant deltas;
-- IDC epoch;
-- authority version;
-- causal frontier.
-
-C4 is intended for operations whose correctness cannot be guaranteed by purely local or algebraic execution but which do not require permanent total ordering.
-
----
-
-## C5 — SERIAL
-
-The affected IDC requires a total order.
-
-Possible implementations:
-
-- replicated sequencer;
-- Raft group;
-- Multi-Paxos group;
-- deterministic transaction ordering.
-
-C5 is mandatory when:
-
-- invariant is unsupported;
-- proof fails;
-- semantic conflict requires total order;
-- global uniqueness cannot be decomposed;
-- administrator explicitly requests strongest semantics.
-
----
+Every family also needs the promised durability, observation boundary, exact outcome recovery and compatible interactions. C3 may require causal scheduling; C5 may require distributed publication. Family numbers do not authorize composition or rank measured cost. C4 is optional and implemented last.
 
 # 19. Compiler safety rule
 
-The compiler MUST be conservative.
-
-Formally:
-
 ```text
-UNPROVEN_SAFE(operation, class)
-    =>
-REJECT(class)
+Unproven obligation -> reject that candidate
+Independent safe compatible alternative available -> may select it
+No complete safe candidate -> NoSafePlan
 ```
 
-The compiler then tries the next stronger class.
-
-The system MUST NOT use statistical evidence such as:
-
-```text
-"we have never observed a violation"
-```
-
-as proof of safety.
-
-Runtime telemetry MAY optimize placement and allocation.
-
-It MUST NOT silently weaken the semantic class.
-
----
+Telemetry and an absence of observed failures are not proofs. A certificate must identify rule versions, premises, assumptions, closed operation set and runtime qualification. Runtime validity checks cannot be replaced by trusting a cached family label.
 
 # 20. Preservation analysis
 
-For operation `O`, invariant `I`, state `S`:
+Sequential preservation includes `I(S) AND Pre(S,a) AND Defined(S,a) => I(S')` for an accepted transition. Concurrent accepted guards/results, duplicate effects, reachability, merge semantics and observation commitments require additional obligations.
 
-```text
-I(S) ∧ Pre(O,S)
-    => I(O(S))
-```
-
-For concurrent operations `A` and `B`:
-
-```text
-I(S)
-∧ Pre(A,S)
-∧ Pre(B,S)
-=>
-I(A(B(S)))
-∧
-I(B(A(S)))
-```
-
-For mergeable replicas:
-
-```text
-I(S1)
-∧ I(S2)
-∧ common_ancestor(S0,S1,S2)
-=>
-I(merge(S1,S2))
-```
-
-The compiler SHOULD support:
-
-- interval arithmetic;
-- abstract interpretation;
-- affine arithmetic;
-- monotonicity inference;
-- set algebra;
-- finite-state transition analysis;
-- symbolic bounds;
-- key-domain reasoning.
-
-SMT MAY be used during compilation.
-
-SMT MUST NOT be required in the transaction hot path.
-
----
+Pairwise commutativity is usable only under a rule that establishes safety for all admitted histories in its stated fragment; higher-arity requirements cannot be dropped. Supported analyses may include interval/key reasoning, abstract interpretation, set/finite-state rules and compilation-time SMT. SMT is not required in the transaction hot path.
 
 # 21. Commutativity analysis
 
-The compiler MUST distinguish:
-
-```text
-syntactic conflict
-```
-
-from:
-
-```text
-semantic conflict
-```
-
-Two writes to the same logical value may commute.
-
-Example:
-
-```text
-counter += 1
-counter += 1
-```
-
-Conversely, operations on distinct rows may conflict through an aggregate invariant.
-
-Example:
-
-```text
-Expense[A] += 100
-Expense[B] += 100
-```
-
-if both participate in:
-
-```text
-SUM(Expense) <= Budget
-```
-
-Therefore row-level conflict detection alone is insufficient.
-
----
+Two increments may commute as mathematical state functions yet overflow a finite representation or return incompatible exact values. Conversely, effects on distinct rows can interact through an aggregate bound. The compiler MUST analyze accepted effects, guards, observations and invariant closure instead of treating row conflict or effect algebra as complete safety.
 
 # 22. Escrow synthesis
 
-Escrow is a first-class compiler target.
+SPEC-004 defines the bounded-resource synthesis fragment and SPEC-006 its runtime accounting. All producers, consumers, bound changes, reservations and invalidators participate in the proof. Supported shapes do not automatically make every operation eligible.
 
-Supported initial invariant shapes:
-
-```text
-x >= L
-x <= U
-SUM(x_i) <= U
-SUM(x_i) >= L
-```
-
-The compiler determines whether an operation consumes or produces rights.
-
-Example:
-
-```text
-withdraw(account, amount)
-```
-
-with:
-
-```text
-balance >= 0
-```
-
-becomes:
-
-```text
-consume_rights(account.balance, amount)
-```
-
-A deposit produces rights:
-
-```text
-produce_rights(account.balance, amount)
-```
-
----
+A consume operation can proceed while its holder has valid sufficient usable rights and all durability/observation obligations hold. Lack of local rights is an authority condition, not evidence of global resource exhaustion.
 
 # 23. Escrow metadata
 
-Each bounded resource maintains:
+SPEC-006 exclusively defines the ledger and conservation equations. `U` denotes usable rights and `X` rights in transit; the business quantity `free = U + X` does not grant spending authority. Admission uses the holder's usable rights with exact `ResourceGeneration` and `HolderAuthorityEpoch` bindings.
 
-```text
-EscrowState {
-    invariant_id
-    resource_id
-    epoch
-    global_bound
-    local_rights
-    delegated_rights
-    consumed_rights
-}
-```
-
-Conservation rule:
-
-```text
-available_global
-=
-sum(local_rights)
-+
-reserved_in_transfer
-+
-already_materialized_capacity
-```
-
-The exact representation MUST be proven not to create rights during retry, replay or failover.
-
----
+Rights metadata is correctness-critical durable state. Client-result durability, holder-authority durability and transfer-decision durability are separate plan policies. A profile that loses the only authoritative evidence may strand capacity; it must never recreate the lost rights from an estimate.
 
 # 24. Rights transfer protocol
 
-Rights transfer MUST be idempotent.
+Use the complete SPEC-006 state machine, durable decision authority and idempotent transfer identity. Moving usable rights into in-transit state, recording transfer decisions, importing recipient rights and replaying each step MUST preserve unique spend authority.
 
-Protocol:
-
-```text
-A -> PREPARE_TRANSFER(id, amount, B)
-
-A:
-    moves amount from usable to reserved
-
-B -> ACCEPT_TRANSFER(id)
-
-A -> COMMIT_TRANSFER(id)
-
-B:
-    materializes rights exactly once
-```
-
-Crash recovery MUST resolve:
-
-```text
-PREPARED
-ACCEPTED
-COMMITTED
-ABORTED
-```
-
-Duplicate messages MUST NOT duplicate authority.
-
----
+No abbreviated prepare/accept/commit exchange in this foundation is an alternative protocol. Timeout is not abort evidence; permanent loss beyond the policy may leave rights unavailable. Transfer authority requires catalog/security authorization as well as ledger consistency.
 
 # 25. Certification
 
-C4 uses a generated certification predicate.
+SPEC-007 owns C4's SnapshotCut, predicate evidence, replicated certifier and durable reservations; SPEC-008 owns shared decision/publication requirements. Validation must cover absent keys, ranges, membership changes, authority and interfering writers. Reservations remain effective until the qualified resolution/publication boundary.
 
-Example:
-
-```text
-CERTIFY withdraw(a,n) {
-    assert epoch == expected_epoch
-    assert version(Account[a]) == read_version
-    assert post_balance >= 0
-}
-```
-
-More generally:
-
-```text
-CertificationProgram {
-    operation_id
-    invariant_ids
-    expected_epoch
-    conflict_domains
-    version_predicates
-    invariant_delta_predicates
-}
-```
-
-The certification program MUST be deterministic and canonical.
-
----
+C4 cannot be enabled by emitting a deterministic predicate alone. Its runtime and applicable formal/fault gates must be qualified, and its complete cost must be compared with C5.
 
 # 26. Transaction envelope
 
-Every mutation execution MUST produce:
+An invocation MUST bind the SPEC-012 `RequestKey`, its `RequestHash`, unique mapped `TxnId`, exact operation/schema/contract/plan identities, concrete `IdcBinding` values and all required authority, causal and observation evidence. Accepted effects and exact outcome data flow into SPEC-002's durable `CompiledBatch` contract.
 
-```text
-TxnEnvelope {
-    txn_id
-    operation_id
-    operation_version
-    schema_hash
-    plan_hash
-    arguments_hash
-    idc_ids
-    consistency_class
-    causal_dependencies
-    authority_tokens
-    read_versions
-    normalized_effect_digest
-    epoch
-}
-```
-
-Replication works on compiled transactional envelopes and normalized effects, not arbitrary application code.
-
----
+Wire envelopes, final receipts and terminal outcome records are defined by their owning specifications. Omitted fields in explanatory examples never license omission of identity, generation, result or durability evidence from persistence.
 
 # 27. Executable Operation Plan
 
-Compilation output:
+The immutable plan contains the full execution profile: admission, visibility, authority, ordering, validation, atomicity, durability, replication, result and recovery programs. It binds analyzed inputs, qualified template/rule versions, topology assumptions, routing selectors and transition requirements.
 
-```text
-OperationPlan {
-    operation_id
-    operation_version
-
-    invariants: [...]
-    idcs: [...]
-
-    class: C0 | C1 | C2 | C3 | C4 | C5
-
-    routing
-    authority_requirements
-    causal_requirements
-    escrow_program
-    certification_program
-    replication_program
-    recovery_program
-
-    proof_summary
-}
-```
-
----
+SPEC-004 owns its canonical representation. A family label is only a dispatch/metrics summary. A hash fixes bytes; it does not authenticate a sender or prove that the bytes implement a correct protocol.
 
 # 28. Plan explanation
 
-Every plan MUST be explainable.
+EXPLAIN MUST show contract/results, affected invariants and IDCs, candidate eligibility/rejection/unknowns, accepted compatibility rules, declared costs, authority/durability assumptions, partition outcomes and prerequisites for any alternative plan.
 
-Command:
-
-```text
-EXPLAIN CONSISTENCY withdraw;
-```
-
-Example result:
-
-```text
-Operation: withdraw
-Class: C3 ESCROW
-
-Reason:
-  withdraw decreases Account.balance
-
-Affected invariant:
-  account_non_negative:
-      Account.balance >= 0
-
-Static result:
-  concurrent withdrawals can violate the invariant
-
-Escrow result:
-  the invariant is decomposable as consumable rights
-
-Coordination:
-  no remote coordination while local rights >= requested amount
-
-Fallback:
-  request additional rights
-  if unavailable, coordinate with current rights authority
-
-Global serialization:
-  not required
-```
-
-This explanation is part of the product, not debugging decoration.
-
----
+For an inventory sale, explain that C1/C2 do not allocate exclusive spending authority; C3 may become eligible with conserved rights; and a C5 alternative requires accounting for every still-authorized writer. Report eligibility as a candidate until rule and runtime evidence permit activation.
 
 # 29. Proof artifact
 
-The compiler MUST emit a machine-readable artifact:
+SPEC-004's consistency certificate records input hashes, rules, premises, candidate rejections, compatibility obligations, assumptions and evidence manifests. Distinguish structural validation, discharged proof obligations and runtime qualification. The artifact is not automatically a proof-assistant theorem.
 
-```text
-ConsistencyProof {
-    compiler_version
-    schema_hash
-    operation_hash
-    invariant_hashes
-    analysis_rules
-    selected_class
-    rejected_weaker_classes
-    assumptions
-    plan_hash
-}
-```
-
-This is not necessarily a formal proof assistant theorem in v1.
-
-It is a deterministic certificate showing why the compiler chose the protocol.
-
-Future versions MAY emit proof objects checkable by an independent verifier.
-
----
+All safety-relevant assumptions MUST have an enforceable predicate or accepted evidence/model reference. Unknown, stale or missing required evidence makes the affected candidate unavailable.
 
 # 30. Storage architecture
 
-The reference implementation SHOULD separate:
+The runtime separates logical state, operation/recovery records and protocol metadata by responsibility, while preserving one atomic local durable boundary for their dependent changes. SPEC-002 defines that boundary through `DurableStorageKernel` and `CompiledBatch`.
 
-```text
-1. State Store
-2. Operation Log
-3. Consistency Metadata Store
-```
-
-Unlike HeraclitusDB, the operation log is not required to be the ontological source of all truth.
-
-Its role here is:
-
-- durability;
-- replication;
-- recovery;
-- protocol reconstruction.
-
----
+The native B+Tree remains the reference storage design. An independent in-memory semantic model and an experimental existing-storage adapter may implement the same interface with explicitly scoped capabilities. The research thesis cannot depend on choosing a particular page structure.
 
 # 31. State Store
 
-Initial engine requirements:
-
-- MVCC;
-- versioned keys;
-- point lookup;
-- ordered range scan;
-- snapshots;
-- atomic batches;
-- deterministic recovery;
-- checksum per page/block;
-- background compaction or page reclamation.
-
-Candidate physical engines:
-
-```text
-B+Tree
-Bw-Tree-like
-LSM
-copy-on-write B-tree
-```
-
-SPEC-002 will choose the reference storage engine after workload analysis.
-
-SPEC-001 intentionally does not allow storage fashion to dictate consistency semantics.
-
----
+SPEC-002 owns local MVCC, typed key encoding, point/range reads, registered snapshots, atomic batches, checksummed journal/pages, recovery and GC. Its native B+Tree choice remains in force. A reference in-memory model does not establish disk durability, and no adapter may advertise a durability capability it has not qualified.
 
 # 32. Operation Log
 
-Record:
-
-```text
-CommittedOperation {
-    commit_id
-    txn_envelope
-    normalized_effects
-    certification_record
-}
-```
-
-The log MUST support:
-
-- append;
-- checksum;
-- crash-safe framing;
-- replay;
-- truncation of incomplete tail;
-- segment rotation;
-- replication cursor.
-
----
+The log carries recoverable business changes, protocol transitions, exact decision/result identity and replay information under SPEC-002. Append framing, checksums, durable barriers, segment retention and incomplete-tail treatment are mandatory. Required committed history cannot be discarded as an incomplete tail merely because decoding fails.
 
 # 33. Consistency Metadata Store
 
-Stores protocol-critical data:
-
-```text
-IDC epochs
-escrow rights
-causal frontiers
-owner leases
-certifier versions
-sequencer positions
-plan versions
-schema versions
-```
-
-This metadata MUST be replicated according to its own correctness requirements.
-
-It MUST NOT be treated as disposable cache.
-
----
+Authority bindings, rights, causal frontiers, request mappings/results, reservations, decision/publication evidence and migration fences are durable protocol state. Each uses its own typed generation/sequence domains and durability policy; none is disposable cache. Replication and GC must retain everything needed to explain commitments and prevent replay.
 
 # 34. Memory model
 
-Hot memory contains:
-
-```text
-active MVCC versions
-IDC routing table
-operation plans
-escrow rights
-causal frontier
-certification index
-lease state
-recent operation ids
-```
-
-Plans MUST be immutable after publication.
-
-Plan replacement MUST use atomic generation swap.
-
----
+Hot caches may hold immutable plans, routing snapshots, MVCC versions, rights views and causal frontiers. Their contents do not grant authority without the owner's admission conditions. Pointer replacement cannot activate a migration or revoke an offline holder. Durable catalog publication, installation and fencing govern new admissions.
 
 # 35. Query execution
 
-Read-only queries are separate from mutation semantics.
+Every read has an explicit observation scope and visibility/result contract. A local snapshot, causal observation, serial-scope value and multi-IDC atomic snapshot are different capabilities. A read used to authorize mutation belongs in the operation's dependency footprint.
 
-Initial query model MAY support:
-
-```text
-GET
-SCAN
-FILTER
-PROJECT
-AGGREGATE
-JOIN
-```
-
-SQL compatibility MAY be added later.
-
-Reads MUST expose consistency explicitly where relevant.
-
-Example:
-
-```text
-READ Account[123]
-AT LOCAL
-```
-
-```text
-READ Account[123]
-AT CAUSAL session
-```
-
-```text
-READ Account[123]
-AT CERTIFIED
-```
-
-The compiler MAY infer the weakest read strength required by an operation.
-
----
+The runtime MUST keep prepared/staged state outside public visibility. Independent local snapshots do not prove a distributed atomic cut. If no qualified plan satisfies a requested observation, return typed unavailability/unsupported status instead of weakening it.
 
 # 36. Session guarantees
 
-Runtime MUST support at least:
+C2 v1 supports read-your-writes, monotonic reads and causal dependencies **within one replication group**, subject to the declared contract and SPEC-005. SPEC-012 owns the group-scoped token encoding and client behavior.
 
-```text
-read-your-writes
-monotonic reads
-causal dependencies
-```
-
-These MUST NOT accidentally imply global linearizability.
-
----
+Cross-group session guarantees require a separately qualified composite plan; they are unsupported in the baseline. A client must not drop another group's dependency, reuse a token in the wrong scope, or infer a global guarantee from independently satisfied group contexts. Migration preserves token meaning through a qualified mapping or returns explicit unavailability.
 
 # 37. Replication by consistency class
 
-## C0
+C1/C2 use SPEC-005's accepted-operation identity, deduplication, semantic application, anti-entropy and group-scoped causal contexts. C3 additionally preserves the SPEC-006 authority ledger. C4 preserves certifier reservations and evidence; C5 preserves ordered authority and decisions under SPEC-008.
 
-Replication policy is a durability choice.
-
-Mutation itself requires no distributed coordination.
-
----
-
-## C1
-
-Operation-based replication preferred.
-
-Requirements:
-
-```text
-idempotent op id
-deduplication
-deterministic application
-anti-entropy
-```
-
----
-
-## C2
-
-Replica messages carry causal metadata.
-
-Candidate representation:
-
-```text
-version vector
-dotted version vector
-hybrid dependency summary
-```
-
-The exact scheme is deferred.
-
----
-
-## C3
-
-Data plus authority/rights metadata are replicated.
-
-Failover MUST NOT create extra rights.
-
-A replica without confirmed rights MUST refuse bounded-resource consumption.
-
----
-
-## C4
-
-Relevant IDC participants certify.
-
-Certification set MAY differ from physical replica set.
-
----
-
-## C5
-
-A strongly ordered replicated log is used for the IDC.
-
-Global cluster-wide consensus MUST NOT be the default if only one IDC requires serialization.
-
----
+Durability is a separate contract dimension for every family. Async delivery does not satisfy a requested replicated-stable final result by itself. Replication membership changes, old-origin delivery and catch-up obey the catalog, codec and evolution contracts.
 
 # 38. Consistency groups are not shards
 
-Traditional design often creates:
-
-```text
-shard -> consensus group
-```
-
-This system SHOULD permit:
-
-```text
-IDC -> consistency protocol
-```
-
-independent of:
-
-```text
-storage shard
-```
-
-This is a central architectural distinction.
-
-Example:
-
-```text
-Shard A:
-  IDC-1 -> C1
-  IDC-2 -> C3
-  IDC-3 -> C5
-```
-
----
+Physical placement is independent of semantic closure and protocol ownership. A shard may host C1, C3 and C5 state only when every interaction has a checked compatibility rule. Separate locks/logs or a common storage engine do not establish that rule.
 
 # 39. Dynamic plan specialization
 
-Static compilation determines the safe protocol family.
-
-Runtime MAY specialize within that safe family.
-
-Example:
-
-```text
-C3 ESCROW
-```
-
-may change rights allocation based on demand.
-
-Example:
-
-```text
-C4 CERTIFIED
-```
-
-may co-locate certifiers based on observed access patterns.
-
-Runtime MUST NOT change:
-
-```text
-C5 -> C1
-```
-
-based solely on telemetry.
-
-Weakening class requires recompilation and proof.
-
----
+The runtime may specialize allocation/placement only through qualified transitions of the admitted plan. Telemetry can propose a new candidate; it cannot extend its proof domain. Safety-relevant changes follow SPEC-009/011 even when the family label is unchanged.
 
 # 40. Dynamic strengthening
 
-Runtime MAY temporarily strengthen consistency without recompilation.
+There is no unconditional runtime strengthening rule. Switching C1/C3/C4 to C5 can change authority, observations, availability and recovery obligations. Such a switch is permitted only through a prequalified transition or a newly compiled candidate with completed admission/drain/fence/install requirements.
 
-Examples:
-
-```text
-C1 -> C4
-C3 -> C5
-C4 -> C5
-```
-
-Reasons:
-
-- topology uncertainty;
-- stale authority;
-- failed lease renewal;
-- partition ambiguity;
-- incompatible plan versions;
-- compiler/runtime version mismatch.
-
-Safety wins over availability.
-
----
+On stale authority, unsupported capabilities or lost prerequisites, wait/refuse according to the contract until a safe transition is possible. Relabeling the request with a larger C number cannot resolve missing evidence.
 
 # 41. Schema evolution
 
-Schema and invariant evolution are protocol changes.
+Schema, invariant, operation and observation changes are versioned semantic changes. Existing final results remain bound to their original contract. New invariants require validation against the complete closed state, including outstanding resource commitments and prepared work.
 
-Every published schema has:
-
-```text
-schema_version
-schema_hash
-invariant_set_hash
-```
-
-Changing an invariant MAY change:
-
-- IDC composition;
-- consistency class;
-- rights allocation;
-- routing;
-- certification program;
-- replication group.
-
-Therefore invariant migration MUST be transactional at the metadata layer.
-
----
+SPEC-009 owns barrier/drain evolution; SPEC-011 serializes overlapping catalog, authority and membership changes. A schema hash alone does not encode all generation/authority identity.
 
 # 42. Recompilation protocol
 
-Changing schema/invariant set:
+Compile and register the complete candidate/transition contract; lock its semantic closure; durably close old authorities; drain accepted/in-doubt work and rights; validate and transform closed state; install target state; atomically activate through catalog CAS; then retire history only after all pins and anti-replay requirements permit it.
 
-```text
-1. Compile candidate generation G+1
-2. Validate all existing data against new invariants
-3. Compute IDC changes
-4. Compute required protocol migrations
-5. Freeze affected semantic boundary if necessary
-6. Drain incompatible operations
-7. Transfer / reconcile rights
-8. Establish new certifiers or sequencers
-9. Publish G+1
-10. Retire G after all old envelopes complete
-```
-
----
+Every durable prefix must have a defined recovery path. An unreachable still-authorized emitter blocks incompatible activation. No clock timeout, catalog increment or deletion of an old fence substitutes for closure evidence.
 
 # 43. Operation versioning
 
-Operations are immutable by version.
-
-Example:
-
-```text
-withdraw@1
-withdraw@2
-```
-
-A transaction envelope references exact version.
-
-Old operation versions MAY remain executable while compatible with current invariants.
-
-Otherwise they MUST be rejected.
-
----
+Operation versions are immutable. A retry resolves its original operation/hash/contract and exact result, even after a new version activates. New invocations of old versions require an explicit compatible admission rule; otherwise reject them. A final outcome cannot be recomputed under new semantics.
 
 # 44. Topology
 
-Reference cluster roles:
-
-```text
-Data Node
-Compiler / Catalog Node
-IDC Coordinator
-Certifier
-Sequencer
-Gateway
-```
-
-A physical process MAY implement multiple roles.
-
-No role is assumed globally centralized.
-
----
+Processes may combine data, gateway, catalog, sequencer and certifier roles. SPEC-014 stages local execution before a three-node control plane and data protocol. Roles are logical authorities, not authorization inferred from process location. No automatic scaling or cloud-specific infrastructure is required for the first experiment.
 
 # 45. Catalog
 
-The catalog stores:
+SPEC-011 owns the ordered replicated catalog, typed generations, immutable artifact registries, placement/membership, capabilities, authority grants/fences, migration ownership, read barriers, recovery and retention. A cached route is not a new authority grant.
 
-```text
-schemas
-operation definitions
-invariants
-compiled plans
-IDC map
-plan generations
-node capabilities
-```
-
-Catalog publication MUST use strong consistency.
-
-This metadata volume is expected to be far smaller than user data.
-
-A small strongly replicated control plane is acceptable.
-
----
+Control-plane unavailability may prevent new grants or activation while an already-authorized plan continues within its documented conditions. It cannot create permission to revoke a disconnected spender or admit a conflicting successor.
 
 # 46. Routing
 
-Gateway receives:
+SPEC-012 defines `RequestKey = (TenantId, RequestNamespace, StableRequestId)` and `RequestHome = route(RequestKey)`. Before any effect, the authorized RequestHome durably compare-and-swaps an absent key to one fresh unique `TxnId` and `RequestHash`; retries return that mapping, and mismatched content is rejected.
 
-```text
-operation + arguments
-```
-
-It loads the immutable operation plan and computes:
-
-```text
-affected keys
-affected IDCs
-owners
-required protocol
-```
-
-Then it dispatches directly to the minimum participant set.
-
-No universal distributed transaction coordinator SHOULD sit on every mutation path.
-
----
+Plan routing then computes concrete IDC participants from canonical arguments and catalog placement. Request routing never depends on a `TxnId` that has not been allocated. Failover/rehome must retain the mapping and fence the old RequestHome authority.
 
 # 47. Multi-IDC transactions
 
-An operation MAY touch multiple IDCs.
+Whole-invocation atomicity requires a qualified composite plan when one operation spans IDCs. Internal parallel work is allowed; independent final commits for the two halves of a transfer are not.
 
-The compiler builds an IDC interaction graph.
-
-If components are independent and effects are separable:
-
-```text
-parallel execution
-```
-
-MAY be allowed.
-
-If atomicity spans components:
-
-```text
-composite certification
-```
-
-or:
-
-```text
-stronger temporary coordination
-```
-
-is required.
-
-Version 1 SHOULD conservatively promote cross-IDC atomic mutations to C4 or C5.
-
----
+The initial distributed composition uses SPEC-008's C5 prepare/decision/install/publication protocol. C4 composition is enabled only after its separate qualification. Promised combined reads and final results must wait/help or use a legal prior cut until publication permits observation; local installation alone is not public completion.
 
 # 48. Failure model
 
-Initial system assumes:
+The baseline covers non-Byzantine crash/recovery, partitions, lost/delayed/reordered/duplicated messages and storage failures within the chosen qualified durability profile. Permanent loss exceeding its durable witnesses is outside that profile and must be reported without fabricating state or outcomes.
 
-```text
-crash-stop / crash-recovery
-network partitions
-message duplication
-message reordering
-delayed messages
-process restart
-disk torn write at tail
-```
-
-Byzantine faults are explicitly out of scope for SPEC-001.
-
----
+No bounded-clock lease assumption or global wall-clock authority order is implicit. SPEC-013 defines identities and trusted channels; authenticated channels do not make compromised consensus members Byzantine-tolerant.
 
 # 49. Crash recovery
 
-Recovery order:
+SPEC-002 restores valid durable state and unresolved records; protocol recovery then reconciles request mappings/results, authority bindings, rights, causal holes, reservations, decisions/publication and catalog admission. Resume only after the required readiness and authority evidence holds.
 
-```text
-1. Recover local operation log
-2. Discard incomplete tail
-3. Restore latest valid state checkpoint
-4. Replay committed operations
-5. Restore consistency metadata
-6. Reconcile IDC epoch
-7. Reconcile rights
-8. Reconcile causal frontier
-9. Rejoin replication groups
-10. Resume operations only after authority is proven
-```
-
----
+Replay preserves semantic origin identity regardless of local MVCC order. Prepared work remains invisible/in doubt until a valid recorded decision resolves it. Transport timeout cannot invent an abort; a durable final result cannot disappear because its reply was lost.
 
 # 50. Failover safety for escrow
 
-Escrow is the most dangerous subsystem in crash recovery.
+A promoted holder must recover authoritative rights for the exact resource generation and holder authority epoch under SPEC-006/011. A replica lacking that evidence has **zero spendable authority** until reconciliation; this is an admission restriction, not a rewrite of the durable resource ledger.
 
-A promoted replica MUST prove its rights state belongs to the active epoch.
-
-If it cannot prove:
-
-```text
-rights(epoch = current)
-```
-
-then:
-
-```text
-available_rights = 0
-```
-
-until reconciliation.
-
-This may reduce availability.
-
-It MUST NOT invent capacity.
-
----
+Authority/transfer durability policies govern whether evidence can be recovered after permanent member loss. Availability can be lost while safety holds. Capacity cannot be reconstructed from stale business `free` alone.
 
 # 51. Network partitions
 
-Behavior is determined by compiled class.
+Progress is conditional on the full plan. C1 needs still-valid admission and local durability; C2 additionally needs its prerequisites; C3 needs usable rights and required witnesses; C4/C5 need their decision/ordering/publication authorities. A contract asking for stronger durability or observations may prevent a nominally local path.
 
-## C1
-
-Continue locally if operation remains semantically safe.
-
-## C2
-
-Continue if causal prerequisites are locally satisfied.
-
-## C3
-
-Continue while sufficient local rights exist.
-
-## C4
-
-Continue only if required certification quorum remains reachable.
-
-## C5
-
-Continue only on the side that retains ordering authority.
-
-This creates **semantic partition tolerance** rather than one cluster-wide behavior.
-
----
+No unconditional availability or fairness promise follows from a family name. Missing authority/dependency and global business rejection are distinct outcomes. Eventual progress assumptions are stated and tested separately from safety.
 
 # 52. Security boundary
 
-The invariant compiler is part of the trusted computing base.
+SPEC-013 owns client/node/cluster/tenant identity, authorization, authenticated channels, credentials, token integrity, revocation, replay and downgrade defenses, audit and storage/backup security profiles.
 
-Compiler output MUST be deterministic.
-
-Production builds SHOULD support:
-
-```text
-reproducible compiler artifact
-signed plan generation
-plan hash verification
-```
-
-Nodes MUST reject an envelope whose:
-
-```text
-plan_hash
-schema_hash
-operation_version
-```
-
-do not match the active generation.
-
----
+The trusted path includes compiler rules/checkers, admitted runtime handlers, catalog authority and durable storage. Nodes validate exact hashes/versions, scoped capabilities, identity, active admission and retained historical replay rules. A valid hash or signature is not a semantic proof; a current authenticated node is not automatically authorized for every tenant/IDC.
 
 # 53. No LLM in correctness path
 
-An LLM MAY:
-
-- propose an invariant;
-- explain a compiler result;
-- generate schema scaffolding;
-- suggest operation definitions.
-
-An LLM MUST NOT:
-
-- decide at runtime whether an invariant is preserved;
-- approve a weaker consistency mode;
-- generate authority tokens;
-- replace certification logic;
-- participate in the trusted correctness path.
-
-Correctness MUST remain deterministic.
-
----
+An LLM may propose contracts, examples or explanations. It MUST NOT decide invariant safety at runtime, waive obligations, issue authority, replace certification or supply unchecked executable semantics. Correctness decisions remain deterministic and attributable to versioned rules and evidence.
 
 # 54. Compiler crate architecture
 
-Reference Rust workspace:
-
-```text
-crates/
-  core/
-  syntax/
-  ir/
-  invariant/
-  effect/
-  analysis/
-  compiler/
-  plan/
-  runtime/
-  storage/
-  log/
-  causal/
-  escrow/
-  certify/
-  serial/
-  replication/
-  catalog/
-  server/
-  client/
-  cli/
-```
-
-The project SHOULD resist premature crate proliferation.
-
-The first compiling milestone MAY combine modules.
-
----
+The first implementation should use a small Rust workspace separating pure language/IR, reference semantics, compiler/plan, storage and runtime/control responsibilities. Causal, escrow, certification and protocol-specific modules are added at their SPEC-014 milestones. Module names and crate boundaries are implementation choices; no crate or CLI is claimed to exist because it is described here.
 
 # 55. Core types
 
-Indicative Rust types:
+SPEC-011 owns the strongly typed identity/generation taxonomy; SPEC-012 owns request identity. In particular:
 
-```rust
-pub struct InvariantId(pub u128);
-pub struct OperationId(pub u128);
-pub struct IdcId(pub u128);
-pub struct PlanHash(pub [u8; 32]);
-pub struct Epoch(pub u64);
-
-pub enum ConsistencyClass {
-    Local,
-    Commutative,
-    Causal,
-    Escrow,
-    Certified,
-    Serial,
+```text
+IdcBinding {
+  idc_id: IdcId,
+  idc_generation: IdcGeneration,
+  authority_epoch: IdcAuthorityEpoch
 }
 ```
 
----
+`CatalogGeneration`, `PlanGeneration`, `IdcGeneration`, `IdcAuthorityEpoch`, `PlacementEpoch`, `MembershipGeneration`, `ResourceGeneration`, `HolderAuthorityEpoch`, `StorageEpoch`, `OriginEpoch`, `RequestHomeEpoch`, `LocalCommitSeq` and `SerialPosition` have distinct scopes. No generic epoch or bare `(IdcId, u64)` may replace their types. Equal encoded integers never authorize interchange.
 
 # 56. Invariant representation
 
-```rust
-pub enum InvariantKind {
-    LowerBound,
-    UpperBound,
-    Unique,
-    Referential,
-    AggregateUpperBound,
-    AggregateLowerBound,
-    Conservation,
-    Monotonic,
-    StateTransition,
-    CausalPrerequisite,
-    Arbitrary,
-}
-```
-
----
+Use SPEC-003's complete `InvariantIR`, including scope and evaluator semantics. A category enum is not a proof or executable evaluator. Unknown required invariant representations fail closed.
 
 # 57. Effect representation
 
-```rust
-pub enum Effect {
-    Assign { target: Path, value: Expr },
-    Increment { target: Path, amount: Expr },
-    Decrement { target: Path, amount: Expr },
-    Insert { target: Domain, value: Expr },
-    Delete { target: Path },
-    AddToSet { target: Path, value: Expr },
-    RemoveFromSet { target: Path, value: Expr },
-    CompareAndSwap { target: Path, expected: Expr, value: Expr },
-    Reserve { resource: Path, amount: Expr },
-    Release { resource: Path, amount: Expr },
-    TransferQuantity { from: Path, to: Path, amount: Expr },
-    AdvanceState { target: Path, from: Expr, to: Expr },
-}
-```
-
----
+Use SPEC-003's `EffectIR` with typed operands, guards, captured reads, atomic groups and definedness checks. The semantic handler named by the plan controls physical lowering; translating concurrent increments into stale snapshot `Put` operations violates the accepted-effect semantics.
 
 # 58. Analysis result
 
-```rust
-pub struct AnalysisResult {
-    pub invariant: InvariantId,
-    pub operation: OperationId,
-    pub preserves_locally: ProofStatus,
-    pub commutative_with: Vec<OperationId>,
-    pub causal_dependencies: Vec<OperationId>,
-    pub escrow_candidate: Option<EscrowPlan>,
-    pub minimum_class: ConsistencyClass,
-    pub assumptions: Vec<Assumption>,
-}
-```
-
----
+Analysis produces per-obligation judgments and candidate/compatibility evidence under SPEC-004. Results include the affected closure, admitted/rejected/unknown candidates, selected profile, costs and explicit assumptions. There is no `minimum_class` field or numeric maximum over per-invariant families.
 
 # 59. Proof status
 
-```rust
-pub enum ProofStatus {
-    Proven,
-    Disproven(CounterExample),
-    Unknown,
-}
-```
+`Proven` means a named accepted rule/checker discharged the stated obligation under listed premises. `Disproven` requires a replayable counterexample. `Unknown`, including unsupported analysis, timeout or missing runtime evidence, never means safe.
 
-Critical rule:
-
-```text
-Unknown
-```
-
-MUST NOT be interpreted as:
-
-```text
-probably safe
-```
-
----
+Bounded model-checking/test success is evidence for its recorded scope, not automatically a proof of an unbounded compiler rule. SPEC-010 qualification verdicts are a different status domain.
 
 # 60. Counterexample generation
 
-When possible, the compiler SHOULD emit a counterexample.
+The compiler SHOULD emit minimized replayable semantic counterexamples when available. The stock-1/two-sale example must capture separately accepted guards, normalized effects and final confirmations, not merely sequentially reject the second sale and conclude concurrency is safe.
 
-Example:
-
-```text
-Invariant:
-    stock >= 0
-
-Operations:
-    sell(1)
-    sell(1)
-
-Counterexample:
-    initial stock = 1
-
-Replica A:
-    stock 1 -> 0
-
-Replica B:
-    stock 1 -> 0
-
-Naive merge of decrements:
-    stock = -1
-
-Result:
-    C1 COMMUTATIVE rejected
-```
-
-Counterexamples are valuable both for developers and research evaluation.
-
----
+The independent reference semantics must reproduce a counterexample before it is labeled disproven. Failure to find one within a bound remains explicitly limited evidence.
 
 # 61. CLI
 
-Initial CLI:
-
-```text
-db compile schema.icc
-db check
-db explain operation withdraw
-db graph invariants
-db plan
-db run
-db status
-db rights
-db certify inspect <txn>
-db replay
-db verify
-```
-
----
+Proposed commands cover compile/check, explain, plan/graph inspection, request resolution, authority inspection, migration inspection and qualification/replay. They are implementation deliverables. Compilation and explanation never activate plans automatically; administrative activation requires the catalog/security protocol.
 
 # 62. EXPLAIN CONSISTENCY
 
-Example:
-
-```text
-$ db explain operation sell
-
-Operation:
-  sell(product_id, qty)
-
-Touched invariant:
-  inventory_non_negative
-
-Attempted classes:
-
-C0 LOCAL
-  rejected:
-  inventory authority may exist on multiple regions
-
-C1 COMMUTATIVE
-  rejected:
-  concurrent decrements can exceed available inventory
-
-C2 CAUSAL
-  rejected:
-  causal ordering alone does not prevent over-consumption
-
-C3 ESCROW
-  accepted:
-  invariant is a decomposable lower bound
-  sell consumes quantity rights
-
-Result:
-  C3 ESCROW
-```
-
----
+Show the whole profile and evaluated candidate set instead of a C0-to-C5 search ladder. A sale example should show the full resource/representation closure, receipt semantics, C1/C2 rejection, C3 rights obligations, C5 authority-transition prerequisites and missing evidence. Costs must include background rights transfer and recovery where relevant.
 
 # 63. Observability
 
-Metrics MUST be semantic, not only physical.
-
-Examples:
-
-```text
-operations_total{operation,class}
-coordination_avoided_total
-coordination_required_total
-rights_available{idc,node}
-rights_transfer_total
-certification_abort_total
-serial_queue_depth{idc}
-causal_wait_total
-plan_generation
-consistency_upgrade_total
-```
-
----
+Measure operations by contract/family; admission refusals versus business rejections; causal waits; rights usable/in transit; transfer backlog; prepared/publication backlog; catalog generations; migration duration; recovery and unknown-request resolution. Use bounded metric labels; exact IDs belong in traces. Audit logs do not substitute for the durable protocol records they describe.
 
 # 64. Benchmark philosophy
 
-The project MUST NOT claim success merely because raw key-value throughput is high.
-
-The central experimental question is:
-
-> How much coordination can the compiler safely eliminate for invariant-rich workloads compared with a strong baseline, while preserving exactly the same application invariants?
-
----
+The experimental question is whether contract-driven plans reduce total coordination cost while preserving **equivalent observable guarantees**. Finality, exact results, failure domains, reads, useful progress and retries must match the comparison. High key-value throughput alone does not answer it.
 
 # 65. Required baselines
 
-At minimum:
+SPEC-010 owns baseline selection and equivalence sheets. Include competent strong local/distributed execution, safe weaker execution where equivalent, manual escrow/causal implementations and a runtime over existing storage. Compare relevant prior-work implementations when reproducible; clearly label reimplementations and unavailable conceptual comparisons.
 
-```text
-PostgreSQL SERIALIZABLE
-PostgreSQL weaker isolation where semantically comparable
-CockroachDB / strongly serializable distributed SQL
-a simple eventual/CRDT baseline for eligible workloads
-hand-written optimized protocol where feasible
-```
-
-Research comparisons SHOULD include conceptual or implementation comparison with:
-
-```text
-I-confluence prototype lineage
-RedBlue-style classification
-LoRe-style selective coordination
-Semi-Linearizability / Event Horizon
-```
-
-Exact systems depend on reproducible availability at evaluation time.
-
----
+Versions, configurations, durability and workload ports must be recorded at evaluation time. No baseline is claimed installed or measured here.
 
 # 66. Required workloads
 
-## 66.1 TPC-C derived
+Use the SPEC-010 W1–W8 contracts: inventory/reservations, account/ledger, unique namespace, causal order, TPC-C-derived subset, edge quota, mixed-domain allocation and plan/contract evolution. Encode invariants, exact return meanings, rejection behavior and observations for each.
 
-Focus:
-
-```text
-NewOrder
-Payment
-StockLevel
-```
-
-Invariants MUST be explicitly encoded.
-
----
-
-## 66.2 Inventory
-
-Operations:
-
-```text
-restock
-sell
-reserve
-release
-transfer_stock
-```
-
-Invariant:
-
-```text
-available >= 0
-reserved >= 0
-available + reserved = total where applicable
-```
-
----
-
-## 66.3 Banking / ledger
-
-Operations:
-
-```text
-deposit
-withdraw
-transfer
-reserve
-release
-```
-
-Invariants:
-
-```text
-balance >= overdraft_limit
-conservation where applicable
-```
-
----
-
-## 66.4 Unique namespace
-
-Operations:
-
-```text
-register_username
-rename_username
-delete_username
-```
-
-Tests global uniqueness behavior.
-
----
-
-## 66.5 Causal workflow
-
-Operations:
-
-```text
-create_order
-confirm_payment
-ship
-cancel
-refund
-```
-
-Tests asymmetric dependencies and partial ordering.
-
----
-
-## 66.6 Edge / disconnected workload
-
-Operations continue under partition according to compiled authority.
-
-This absorbs the strongest useful part of the local-first direction without turning the system into a sync SDK.
-
----
+These are synthetic research workloads, not official benchmark compliance or validated application deployments. Include adversarial exact-result, finite-overflow, revocation and cross-domain variants.
 
 # 67. Metrics
 
-Measure:
-
-```text
-throughput
-p50 latency
-p95 latency
-p99 latency
-cross-region messages per operation
-consensus rounds per operation
-bytes coordinated per operation
-availability during partition
-abort rate
-rights starvation
-rights rebalance cost
-recovery time
-compiler time
-plan size
-number of operations per consistency class
-coordination avoided relative to serial baseline
-```
-
----
+Report useful committed throughput; p50/p95/p99 end-to-end request latency including retries/waits; outcome categories; foreground/background messages/bytes; fsync/ordering rounds; rights starvation/rebalancing; compiler/metadata costs; catch-up/recovery; and migration disruption. Publish the workloads where conventional coordination wins.
 
 # 68. Correctness testing
 
-Performance tests are invalid unless accompanied by invariant checking.
-
-Every benchmark MUST continuously verify:
-
-```text
-all declared invariants
-```
-
-The test harness MUST fail immediately on violation.
-
----
+Benchmarks are invalid if the independent oracle finds a contract/invariant violation. Check complete histories, durable outcomes, authority and legal observation scopes, not just converged rows. A final reservation erased after an upgrade is a failure even if final stock remains nonnegative.
 
 # 69. Jepsen-style testing
 
-A distributed correctness harness SHOULD inject:
+SPEC-010 requires deterministic schedules and real-process fault campaigns for enabled distributed features. Include retries, process crashes, partitions, stale authorities, decision/publication gaps, causal holes, storage faults and evolution/GC. Claim actual Jepsen execution only with retained framework configuration and results; a bespoke runner is identified as such.
 
-```text
-process crash
-network partition
-packet delay
-message duplication
-leader failure
-clock skew
-disk restart
-rolling restart
-catalog generation change
-rights transfer crash
-```
-
-After every execution:
-
-```text
-invariants == satisfied
-```
-
-must hold for all committed states according to declared semantics.
-
----
+Only isolated allowlisted test infrastructure may be a fault target. Existing EVA/NietzscheDB and the shared HeraclitusDB memory service are not test targets.
 
 # 70. Model checking
 
-Small protocol models SHOULD be written in:
+The mandatory applicable formal gates in SPEC-010 are FM-1 (escrow transfer/authority), FM-2 (decision/publication) and FM-3 (evolution/fencing). A distributed correctness claim requires its model-checking evidence, passing deterministic simulation and passing real-process fault campaign.
 
-```text
-TLA+
-```
-
-or an equivalent formal specification framework.
-
-Minimum protocols to model:
-
-```text
-escrow transfer
-C4 certification
-IDC epoch transition
-schema-plan generation transition
-C5 failover
-```
-
----
+Each gate records model/tool versions, invariants, fairness assumptions, explored bounds, negative controls and implementation transition mapping. This conjunction does not prove arbitrary Rust code correct. A stage that does not enable the feature may defer that feature's gate; it cannot advertise the feature as qualified.
 
 # 71. Property-based testing
 
-Rust implementation SHOULD use property-based testing for:
-
-```text
-effect normalization
-commutativity
-merge idempotence
-rights conservation
-operation replay
-plan determinism
-canonical hashing
-```
-
----
+Use independent properties for typed evaluation, normalization equivalence, accepted-effect replay, merge idempotence, rights conservation, deterministic planning and canonical identity. Tests must check semantics and meaningful boundaries rather than mirror the implementation.
 
 # 72. Fuzzing
 
-Fuzz:
-
-```text
-parser
-IR decoder
-operation log decoder
-plan decoder
-network messages
-recovery records
-```
-
-Invalid input MUST fail closed.
-
----
+Fuzz parsers and IR, plan, receipt, wire, snapshot, journal and recovery decoders with explicit resource bounds. Invalid/unknown mandatory semantics fail closed. Use SPEC-012's compatibility/negative corpus and SPEC-002's physical-format requirements.
 
 # 73. Compiler correctness target
 
-Two distinct properties:
+**Soundness target:** every admitted execution of the selected compatible plans satisfies the full contract under its supported assumptions, including invariant validity, observations, outcomes, authority, durability and recovery/evolution obligations.
 
-## Soundness
-
-If the compiler selects class `C`, executions permitted by `C` MUST preserve declared invariants under the supported failure model.
-
-## Precision
-
-The compiler SHOULD avoid choosing stronger coordination when a weaker supported class can be proven safe.
-
-Soundness is mandatory.
-
-Precision is an optimization/research objective.
-
----
+**Precision/cost target:** accept useful contracts and choose lower declared cost among supported compatible safe alternatives. Neither a globally weakest execution nor a complete arbitrary-program analysis is required or claimed. Soundness is mandatory for admitted capabilities; precision is measured research/optimization work.
 
 # 74. Research hypotheses
 
-The project should be evaluated against explicit hypotheses.
+H1: restricted declared contracts permit useful deterministic lowering and safe plan derivation without manual protocol implementation.
 
-### H1
+H2: per-IDC plans reduce total coordination cost versus equivalent conservative execution for a meaningful workload region.
 
-Application invariants and normalized operation effects permit automatic derivation of weaker safe coordination for a meaningful fraction of transactional operations.
+H3: conserved escrow authority improves useful partition progress under explicitly measured durability and resource-distribution conditions.
 
-### H2
+H4: directed dependencies reduce unnecessary ordering under equivalent observable contracts and compatible composition.
 
-Per-IDC consistency reduces cross-region coordination relative to database-wide serializable execution.
+H5: supported mixed plans and their authority/contract transitions preserve observable commitments through the tested failure model, with a scoped formal refinement construction.
 
-### H3
-
-Escrow synthesis materially improves availability during partitions for bounded-resource invariants.
-
-### H4
-
-Directed operation dependencies avoid coordination that symmetric conflict models would impose.
-
-### H5
-
-A fail-safe compiler can provide these reductions without increasing invariant violations relative to a strongly serializable baseline.
-
----
+These are unconfirmed hypotheses. SPEC-010 E1–E5 defines the experiments; neither document status nor zero reported tests supports them.
 
 # 75. Falsification criteria
 
-The research direction SHOULD be abandoned or reduced to a library if experiments show any of the following:
+Reduce scope, prefer a runtime/library or abandon the thesis if useful contracts mostly require conservative execution, annotations amount to hand-written protocols, metadata/background costs erase gains, exact observations remove the benefit, composition/evolution cannot preserve commitments, or the proposed result is already covered by prior work.
 
-1. Most real operations compile to C5.
-2. Developers must provide so many annotations that manual protocol design is simpler.
-3. Static analysis cannot derive materially better plans than straightforward conflict analysis.
-4. Runtime metadata cost erases coordination savings.
-5. Escrow/causal/certification protocols dominate implementation complexity without broad workload benefit.
-6. PostgreSQL plus a thin compiler extension achieves essentially identical semantics and performance.
-7. Correctness requires unrestricted application code in the trusted analysis path.
-8. Plan migration is too disruptive for production use.
-
-This section is intentional. A research system must be able to fail its thesis.
-
----
+A supported counterexample blocks correctness qualification immediately. Equivalent benefit over existing storage challenges the need for a new engine. Report negative and inconclusive experiments; commercial demand and scientific novelty require evidence beyond protocol correctness.
 
 # 76. Why this may require a new DBMS
 
-A PostgreSQL extension can implement:
+The compiler must control every protected writer's admission, effects, authority, durability, replication, reads and evolution. This motivates an integrated runtime; it is not an impossibility proof against extensions or middleware.
 
-```text
-custom types
-triggers
-functions
-new indexes
-background workers
-foreign data wrappers
-```
-
-But the architecture in this SPEC requires the compiler to control:
-
-```text
-transaction routing
-replication mode
-coordination participants
-causal metadata
-escrow authority
-certification
-consensus scope
-failover behavior
-schema migration semantics
-recovery behavior
-```
-
-on a per-operation and per-IDC basis.
-
-If PostgreSQL remains the authority over:
-
-```text
-WAL
-MVCC
-transaction manager
-replication semantics
-lock manager
-commit path
-```
-
-then the compiler cannot fully implement the architecture without fighting the host DBMS.
-
-The decisive test is:
-
-> If implementing the model requires replacing the transaction manager, replication semantics, routing and commit protocol, it is no longer merely a PostgreSQL extension.
-
----
+SPEC-002 retains a native B+Tree behind the durable kernel interface. SPEC-010 E5 compares the same semantics over existing storage. If native storage adds no useful benefit, a layer over existing storage is a valid outcome of the research.
 
 # 77. Difference from NietzscheDB
 
-NietzscheDB centers on:
-
-```text
-knowledge
-graph structure
-multi-manifold geometry
-cognitive memory
-reasoning
-semantic activation
-```
-
-Its primary question is approximately:
-
-```text
-How should machine knowledge be represented,
-organized, traversed and evolved?
-```
-
-SPEC-001 does none of this.
-
-It has no required:
-
-```text
-embedding
-HNSW
-Poincaré geometry
-GNN
-ACT-R
-semantic memory
-LLM
-```
-
-The abstraction is distributed correctness, not cognition.
-
----
+This experiment addresses transactional contracts and distributed coordination. It introduces no requirement for vector search, geometric graph representation, cognitive memory, GPUs or LLMs. It does not change EVA's NietzscheDB backend or operations.
 
 # 78. Difference from HeraclitusDB
 
-HeraclitusDB centers on an immutable canonical event history from which derived views can be reconstructed, with strong emphasis on:
-
-```text
-auditability
-provenance
-replay
-temporal inspection
-integrity
-multi-model retrieval
-government/security workloads
-```
-
-SPEC-001 asks a different question:
-
-```text
-Before an operation commits,
-what coordination is mathematically necessary
-to preserve the declared application invariants?
-```
-
-HeraclitusDB may later consume or record decisions generated by this system.
-
-That does not make them the same architecture.
-
-The primary object here is not:
-
-```text
-immutable historical event
-```
-
-It is:
-
-```text
-compiled invariant-preserving operation
-```
-
----
+The primary experimental artifact is an executable operation contract with a justified distributed plan. Local event history and durable evidence support recovery; their use does not by itself establish the proposed composition result. No modification of existing HeraclitusDB services is required to revise or validate these specifications.
 
 # 79. Architectural identity
 
-The architecture can be summarized in one sentence:
+> A conservative compiler and runtime for observable operation contracts, selecting compatible qualified plans and preserving final commitments through composition, authority transfer, evolution and recovery.
 
-> **A semantic transaction compiler that turns application invariants into the minimum safe distributed coordination protocol.**
-
-If implementation drifts away from that sentence, it should be reconsidered.
-
----
+This is a design objective and candidate research direction, not an implemented capability claim.
 
 # 80. MVP boundary
 
-The first prototype MUST be deliberately small.
+[SPEC-014](SPEC-014.md) is the sole implementation-sequencing owner. Start with typed records, checked integer/fixed-decimal semantics, point-scoped bounds and a complete sequential interpreter. Add only explicitly qualified shapes and profiles. C5 provides the first plan/runtime reference; C1/C2 and C3 follow; C4 is last and optional.
 
-Support only:
-
-```text
-key-value / typed records
-integer and fixed-decimal numeric fields
-lower/upper bounds
-uniqueness
-simple referential constraints
-monotonic sets
-causal prerequisites
-
-operations:
-  assign
-  increment
-  decrement
-  insert
-  add-to-set
-  compare-and-swap
-
-classes:
-  C0
-  C1
-  C2
-  C3
-  C5
-```
-
-C4 certification MAY enter after the first correctness prototype.
-
----
+The historical milestone IDs M0–M10 below remain traceability labels. Their numeric order is not the implementation schedule; SPEC-014 MVP-0–MVP-8 supersedes that schedule.
 
 # 81. MVP topology
 
-Three nodes.
-
-```text
-Node A
-Node B
-Node C
-```
-
-No automatic elastic scaling.
-
-No Kubernetes dependency.
-
-No cloud-specific dependency.
-
-No GPU.
-
-No CXL.
-
-No vector search.
-
-No dashboard before correctness.
-
-The point is to prove the semantic compiler, not decorate it.
-
----
+Begin with an in-memory semantic reference and a single local storage process. The first distributed experiment uses three isolated node processes with independent data directories and declared durability domains. It needs no Kubernetes, GPU, CXL, cloud dependency or dashboard. Co-located test processes do not establish independent machine-loss durability.
 
 # 82. Milestone M0 — Formal core
 
-Deliver:
-
-```text
-language grammar
-typed AST
-Invariant IR
-Effect IR
-formal state model
-formal operation model
-IDC definition
-consistency class definitions
-```
-
-Exit criterion:
-
-A set of hand-written examples can be lowered deterministically into IR.
-
----
+Historical work package: grammar, typed AST/IR, explicit contracts, reference interpreter and canonical artifacts. Delivered through SPEC-014 MVP-0. Exit requires executable positive/negative fixtures, deterministic bytes and explicit unsupported semantics.
 
 # 83. Milestone M1 — Static analyzer
 
-Implement:
-
-```text
-dependency graph
-locality analysis
-commutativity analysis
-simple preservation proofs
-counterexample generation
-```
-
-Exit criterion:
-
-Compiler correctly distinguishes safe/unsafe coordination-free examples.
-
----
+Historical work package: conservative semantic closure, sequential validity, candidate obligations, evidence and explanations. MVP-1 begins with C5 selection only and typed rejection. Later protocol derivation follows the feature milestones; an eligible template is not active before runtime qualification.
 
 # 84. Milestone M2 — Single-node runtime
 
-Implement:
-
-```text
-state store
-operation log
-operation executor
-plan executor
-recovery
-```
-
-Even though distributed protocols are not active yet, mutation MUST already go through compiled plans.
-
----
+Historical work package: native storage, compiled admission, atomic business/protocol/request/outcome persistence and crash recovery. Delivered through MVP-2. Mutation already follows plans; recovered retries return the same exact outcome.
 
 # 85. Milestone M3 — C1 replication
 
-Implement:
-
-```text
-operation IDs
-idempotent replication
-anti-entropy
-commutative application
-```
-
-Exit criterion:
-
-Concurrent replicated operations converge and preserve supported invariants.
-
----
+Historical work package delivered in MVP-5, after the C5 distributed reference and publication boundary. Qualify accepted-effect identity, convergence, anti-entropy, exact receipt replay and bounded overflow/observation exclusions.
 
 # 86. Milestone M4 — C2 causal execution
 
-Implement:
-
-```text
-causal dependency metadata
-causal wait
-session frontier
-partial-order replication
-```
-
----
+Historical work package delivered in MVP-5. Qualify group-scoped prerequisites, holes, sessions, catch-up and durable publication. Cross-group session guarantees remain disabled without a separate composite plan.
 
 # 87. Milestone M5 — C3 escrow
 
-Implement:
-
-```text
-rights allocation
-rights consumption
-rights production
-rights transfer
-epoch safety
-crash recovery
-```
-
-This milestone is the first major research-quality checkpoint.
-
----
+Historical work package delivered in MVP-6. Qualify resource synthesis, consumption/production, reservation lifecycle, transfer, holder fencing and distinct durability policies. FM-1 and both simulation/process fault evidence are mandatory for a distributed claim.
 
 # 88. Milestone M6 — C5 serial IDC
 
-Implement:
-
-```text
-per-IDC replicated sequencer
-strong ordering
-failover
-```
-
-No global sequencer unless one invariant genuinely creates one global IDC.
-
----
+Historical work package moved **before C1/C2/C3**: MVP-3 establishes the three-node catalog and single-IDC C5 authority; MVP-4 establishes multi-IDC decision/publication. Ordered execution still validates all contract obligations and does not admit unsupported sequential semantics.
 
 # 89. Milestone M7 — Multi-class operation planner
 
-One application MUST simultaneously run operations compiled to:
-
-```text
-C1
-C2
-C3
-C5
-```
-
-against related data.
-
-This is a key demonstration.
-
----
+Historical work package integrated during MVP-5/6 and requalified during MVP-7. Each enabled interacting mixture requires explicit compatibility and observation evidence. Merely running independent families side by side is not a composition result.
 
 # 90. Milestone M8 — C4 certification
 
-Implement generated certification for cases lying between escrow/causal execution and total serialization.
-
-Research question:
-
-```text
-Can invariant-specific certification shrink the serializable conflict domain
-enough to justify C4 as a distinct class?
-```
-
-If not, C4 SHOULD be removed rather than preserved for architectural vanity.
-
----
+Historical work package delivered last in MVP-8. Enable only if complete predicate certification, durable reservations and decision/publication pass applicable gates and measured workloads justify its cost versus C5. It may remain disabled indefinitely.
 
 # 91. Milestone M9 — Dynamic plan generation
 
-Implement:
-
-```text
-schema generation
-plan generation
-safe publication
-old-plan draining
-IDC epoch migration
-```
-
----
+Historical work package delivered in MVP-7, before optional C4. Implement SPEC-009 barrier/drain, immutable transitions, close/install/activate recovery, retained request outcomes and session mapping. FM-3 is mandatory; overlapping incompatible generations remain unsupported.
 
 # 92. Milestone M10 — Evaluation
 
-Required output:
-
-```text
-correctness report
-fault-injection report
-TPC-C-derived evaluation
-inventory benchmark
-banking benchmark
-causal workflow benchmark
-partition availability study
-coordination-cost study
-comparison to strong baseline
-comparison to manually optimized baseline
-```
-
-No invented benchmark numbers.
-
----
+Each MVP stage produces evidence; comparative research evaluation follows the applicable SPEC-010 gates. Deliver supported capability manifests, failures/unknowns, equivalent-contract baselines, composition/evolution histories, performance distributions and storage-comparison results. Never invent benchmark numbers, fixture hashes or completed proofs.
 
 # 93. Minimum paper contribution
 
-A publishable research paper SHOULD NOT be:
+A paper must identify a precise new result beyond known invariant analysis, escrow, per-operation consistency or directed dependencies. The preferred candidate is a useful compositional observable-refinement construction covering explicit authority, evolution and failure behavior in a stated fragment.
 
-> "We built a database that supports six consistency modes."
-
-That is not enough.
-
-A strong paper needs at least one new result such as:
-
-```text
-1. a new compiler algorithm deriving protocol choice from invariant/effect IR;
-2. a novel directed dependency analysis that safely reduces coordination;
-3. automatic escrow synthesis for a broader invariant class;
-4. a new invariant-specific certification algorithm;
-5. a new decomposition algorithm for IDC construction;
-6. a correctness proof plus evidence that the generated plans approach hand-tuned protocols.
-```
-
-The DBMS is the experimental vehicle.
-
-The algorithmic result is the paper.
-
----
+Proof/argument, limits, prior-art comparison and reproducible experiments must support that result. Six protocol labels, a native engine and a working prototype alone do not establish it.
 
 # 94. Definition of success
 
-The project succeeds if a developer can write:
+A developer can declare inventory/reservation rules, effects and receipt/read semantics. The compiler explains eligible plans, rejects unsupported promises and derives a qualified plan. The runtime permits useful work under its stated authority/durability conditions, preserves exact final results through retries and faults, and carries commitments through a qualified transition.
 
-```text
-INVARIANT stock_non_negative {
-    Product.stock >= 0
-}
-
-OPERATION sell(id, qty) {
-    Product[id].stock -= qty
-}
-```
-
-and the system can correctly answer:
-
-```text
-This operation cannot run as naive eventual consistency.
-
-It does not require a global serializable transaction.
-
-The invariant is decomposable.
-
-Compile as ESCROW.
-
-Allocate quantity rights per replica.
-
-Permit disconnected execution while local rights remain.
-
-Refuse or coordinate when rights are exhausted.
-
-Preserve stock >= 0 under crash, retry and partition.
-```
-
-without the developer implementing that distributed protocol manually.
-
-That is the first real target.
-
----
+Success is measured by executable evidence and equivalent-contract benefit. Preserving stock nonnegative by rejecting every request is insufficient evidence of usefulness.
 
 # 95. Definition of failure
 
-The project fails if the developer still has to write:
-
-```text
-use_serializable = false
-use_crdt = true
-use_escrow = true
-leader = us-east
-quorum = 2
-causal = false
-```
-
-The purpose of the compiler is precisely to derive those implementation choices from semantics wherever possible.
-
----
+The intended abstraction fails when developers still implement the correctness-critical protocol manually, accepted plans violate declared observations or commitments, or gains depend on quietly weakening the comparison contract. Safe rejection of an unsupported contract is expected compiler behavior; broad rejection may refute usefulness rather than soundness.
 
 # 96. Final invariant of the project
 
-The system itself has one architectural invariant:
-
 ```text
-NO WEAKER EXECUTION WITHOUT A PROOF OBLIGATION BEING SATISFIED
+NO ADMITTED EXECUTION WITHOUT ITS FULL CONTRACT OBLIGATIONS SATISFIED
+NO FINAL COMMITMENT ERASED BY RETRY, RECOVERY OR PLAN EVOLUTION
 ```
 
-Performance is optimized below that line.
-
-Never above it.
-
----
+Optimization is limited to compatible qualified candidates under explicit assumptions. If evidence is missing, the capability remains unavailable.
 
 # References
 
-1. Peter Bailis, Alan Fekete, Michael J. Franklin, Ali Ghodsi, Joseph M. Hellerstein, Ion Stoica. **Coordination Avoidance in Database Systems.** PVLDB 8(3), 2014/2015.  
-   https://www.vldb.org/pvldb/vol8/p185-bailis.pdf
-
-2. Cheng Li, Daniel Porto, Allen Clement, Johannes Gehrke, Nuno Preguiça, Rodrigo Rodrigues. **Making Geo-Replicated Systems Fast as Possible, Consistent when Necessary.** OSDI 2012.  
-   https://www.usenix.org/conference/osdi12/technical-sessions/presentation/li
-
-3. Cheng Li, Nuno Preguiça, Rodrigo Rodrigues. **Fine-grained consistency for geo-replicated systems.** USENIX ATC 2018.  
-   https://www.usenix.org/conference/atc18/presentation/li-cheng
-
-4. Julian Haas, Ragnar Mogk, Elena Yanakieva, Annette Bieniusa, Mira Mezini. **LoRe: A Programming Model for Verifiably Safe Local-First Software.** 2023.  
-   https://arxiv.org/abs/2304.07133
-
-5. Jonathan Arns, Harald Ng, Kyriakos Psarakis, Asterios Katsifodimos, Paris Carbone. **Event Horizon: Asymmetric Dependencies for Fast Geo-Distributed Operations.** CIDR 2026.  
-   https://www.vldb.org/cidrdb/2026/event-horizon-asymmetric-dependencies-for-fast-geo-distributed-operations.html
-
-6. Michael Stonebraker, Xinjing Zhou, Peter Kraft, Qian Li. **Consistency and Correctness in Data-Oriented Workflow Systems.** CIDR 2026.  
-   https://www.vldb.org/cidrdb/2026/consistency-and-correctness-in-data-oriented-workflow-systems.html
-
----
+- [Research proposal](../PROPOSTA-DE-PESQUISA.md), especially §§1–2 and direction A: observable contracts and conditional research scope.
+- [Prior-art analysis](../research/consistency-prior-art.md): maintained primary-source bibliography, predecessors, research hypotheses and falsification experiments.
+- [Review input](REVISAR.md): cross-specification findings motivating Draft 0.2; retained as review evidence, not rewritten as implementation status.
+- [Implementation profile](SPEC-014.md): authoritative staged delivery and evidence requirements.
 
 # End of SPEC-001

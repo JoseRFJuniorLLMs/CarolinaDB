@@ -1,12 +1,13 @@
 # SPEC-007 — Certified Transactions
 
 **Subtitle:** Optimistic Execution, Predicate Validation and Durable Reservations  
-**Status:** Draft 0.1 — proposed implementation contract; not an implemented or proven protocol  
+**Status:** Draft 0.2 — proposed implementation contract; not an implemented or proven protocol  
 **Date:** 2026-09-09  
 **Type:** Distributed runtime specification  
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md)  
 **Protocol interfaces:** [SPEC-005](SPEC-005.md), [SPEC-006](SPEC-006.md), [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md)  
 **Qualification:** [SPEC-010](SPEC-010.md)  
+**Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog and typed authority), [SPEC-012](SPEC-012.md) (request identity, receipts and codecs), [SPEC-013](SPEC-013.md) (security and trust)  
 **Reference implementation:** Rust stable; certification in `astra-runtime`, outside `astra-storage`  
 **Normative terms:** MUST, MUST NOT, SHOULD, SHOULD NOT and MAY express requirements on a conforming implementation.
 
@@ -22,7 +23,7 @@ The atomic transaction decision and publication protocol is defined by SPEC-008,
 
 C4 does not establish a permanent total execution order for every operation in an IDC. Consensus may order certifier metadata requests, while nonconflicting transactions execute concurrently. The first implementation uses conservative conflict detection; invariant-specific reductions are separate optimizations requiring a checked rule and a composition argument.
 
-This specification does not claim that this baseline outperforms C5 or constitutes a new protocol. SPEC-001's M8 experiment must determine whether C4's additional machinery is useful.
+This specification does not claim that this baseline outperforms C5 or constitutes a new protocol. SPEC-010's equivalent-contract experiment must determine whether C4's additional machinery is useful. C4 is implemented after the qualified C1/C2/C3/C5 baselines and evolution foundations, as ordered by SPEC-014.
 
 ## 1. Contract semantics at certification
 
@@ -70,24 +71,35 @@ There is no best-effort certification mode. An administrator's request for weake
 
 ## 3. Identity, epochs and membership
 
-The following are conceptual typed records. Their layout is not a frozen wire or disk format. Versioned canonical codecs, bounds and golden fixtures are required before compatibility is claimed.
+The following are conceptual records using SPEC-011's strong types. Their layout is not a frozen wire or disk format. SPEC-012 owns versioned canonical codecs, bounds, receipt formats and golden fixtures, which must pass before compatibility is claimed. Authentication and verification of authority evidence follow SPEC-013 independently of content hashes.
 
 ```text
 CertificationContext {
-    txn_id
-    request_hash
-    operation_id; operation_version
-    schema_hash; contract_hash; plan_hash; plan_generation
-    idc_memberships: [(idc_id, idc_generation, authority_epoch, membership_hash)]
-    decision_authority_id; decision_authority_epoch
+    txn_id: TxnId
+    request_key: RequestKey; request_hash: RequestHash
+    request_home_epoch: RequestHomeEpoch
+    operation: OperationRef; operation_hash: OperationHash
+    schema_hash: SchemaHash; contract_hash: ContractHash
+    plan_hash: PlanHash; plan_generation: PlanGeneration
+    idc_memberships: [CertificationMembership]
+    decision_authority_id; decision_idc_binding: IdcBinding
     participant_set_hash
     snapshot_cut_id
     read_contract_hash
     effects_digest; result_digest; commitment_digest
 }
+
+CertificationMembership {
+    idc_binding: IdcBinding
+    membership_hash
+    placement_epoch: PlacementEpoch
+    membership_generation: MembershipGeneration
+}
 ```
 
-`request_hash` binds the client's immutable semantic request, including operation version, canonical arguments and declared session/read contract. Runtime placement and plan generation are stored separately; changing a route cannot change request identity. `TxnId` reuse with different request content MUST return `IdentityConflict` without effects.
+`RequestKey = (TenantId, RequestNamespace, StableRequestId)` routes to its SPEC-012 request home before `TxnId` exists. That home durably CAS-creates one mapping to a globally unique `TxnId` and immutable request hash before certification begins. The hash binds the canonical operation/schema/contract identity, arguments and original session/read contract. Placement, plan choice and certification attempts remain separate. A matching retry resolves the original mapping and exact receipt; changed content under one key returns `RequestIdentityMismatch` without effects. An unresolved home cannot be bypassed with a new transaction or certifier.
+
+Each `IdcBinding` contains `IdcId`, semantic `IdcGeneration` and `IdcAuthorityEpoch`; numeric equality cannot substitute one for another. The decision authority is the pinned IDC authority selected in SPEC-008. Catalog, plan, placement, consensus membership, origin and storage generations retain their independent SPEC-011 scopes.
 
 An IDC membership record MUST include the semantic domain instances, their certifier authorities, physical participants and dependency scopes. The membership is sealed before `BEGIN` in SPEC-008. A row creation, deletion or grouping-key change that could alter membership MUST reserve the relevant membership/index domain. A new row does not escape an invariant merely because it was absent when the IDC map was built.
 
@@ -109,8 +121,9 @@ Snapshots retain version, index, membership and decision metadata needed for lat
 
 ```text
 PointReadToken {
-    authority_id; authority_epoch
-    storage_epoch
+    authority_id; idc_binding: IdcBinding
+    storage_epoch: StorageEpoch
+    placement_epoch: PlacementEpoch
     key_codec_version; canonical_key
     snapshot_cut_id
     observed: Present(version_stamp, value_digest)
@@ -127,8 +140,9 @@ Tokens from one storage epoch are not comparable to tokens from another. A moved
 
 ```text
 RangeReadToken {
-    authority_id; authority_epoch
-    storage_epoch
+    authority_id; idc_binding: IdcBinding
+    storage_epoch: StorageEpoch
+    placement_epoch: PlacementEpoch
     index_id; index_generation; key_codec_version
     canonical_bounds; endpoint_inclusivity
     predicate_digest
@@ -163,7 +177,7 @@ Protecting only output rows is insufficient for uniqueness, aggregates and refer
 
 Each conflict domain SHALL have one active certifier authority implemented by a replicated state machine outside the storage kernel. The initial deployment uses a fixed voting configuration with intersecting consensus quorums. A majority of arbitrary data replicas is not a substitute for this authority's configured quorum.
 
-The authority stores its epoch, domain map, committed change revisions, durable reservations and transaction outcomes. Admission MUST prove current leadership through its consensus implementation, not a cached leader address. Data owners accept mutations only with the required valid authority evidence and generation.
+The authority stores its typed IDC binding, domain map, committed change revisions, durable reservations and transaction outcomes. SPEC-011 owns its registry, admitted capabilities, placement and authority grants; admission MUST additionally prove current leadership through its consensus implementation, not a cached leader address. Data owners accept mutations only with authenticated SPEC-013 evidence for the exact SPEC-008 participant descriptor and required typed bindings. Neither a catalog quorum nor a valid client credential replaces a certifier's vote.
 
 The shared lock model is defined in SPEC-008:
 
@@ -214,7 +228,7 @@ An exclusive reservation is not an MVCC committed version. Prepared user/index c
 ### 7.1 Speculate
 
 ```text
-1. Resolve the immutable request identity; replay an existing final result if present.
+1. Authenticate/authorize under SPEC-013 and resolve SPEC-012's durable RequestKey mapping; replay an existing final receipt if present.
 2. Verify operation/contract/plan compatibility and current admission generation.
 3. Compute a conservative semantic footprint and seal membership.
 4. Obtain a coordinated SnapshotCut and capture point/range evidence.
@@ -237,7 +251,8 @@ No speculative response is marked final. Tentative output, if exposed, must carr
 5. Validate point and predicate revisions against the authoritative committed state.
 6. Evaluate all state preconditions, postconditions, affected invariants,
    return constraints and commitment obligations with exact arithmetic.
-7. Build exact user/index/protocol/result batches for every physical participant.
+7. Build exact SPEC-002 batches with the full request/operation/contract/plan/IDC
+   identity, user/index/protocol changes, immutable result and commitments.
 8. Durably prepare those batches; persist PreparedYes and its exact token set.
 9. Submit the vote to SPEC-008's transaction decision authority.
 10. Keep all reservations through resolution and publication.
@@ -271,20 +286,20 @@ Without that proof, SPEC-009 must freeze and reconcile the affected weaker emitt
 
 Read-only certification follows the same dependency validation, may use shared reservations and records any promised final decision/result. It cannot serve an `increment_and_get()` exact global result from an arbitrary local increment replica.
 
-A final mutation response includes at least:
+A final mutation response uses SPEC-012's `FinalReceiptV1`; this document does not define a competing receipt codec. The durable receipt and its protocol evidence MUST retain:
 
 ```text
-FinalResult {
-    txn_id; request_hash; operation_version; contract_hash
-    outcome: Committed | Rejected
-    result_bytes; result_digest
-    commitment_ids
-    plan_generation; decision_reference; publication_reference_if_committed
-    session_frontier
-}
+RequestKey; mapped TxnId; immutable RequestHash
+OperationRef; OperationHash; SchemaHash; ContractHash
+PlanHash; PlanGeneration; exact IdcBindings
+terminal outcome; exact result bytes/digest; issued commitments
+decision evidence; publication and completion evidence for committed work
+typed read/session evidence and its exact scope
 ```
 
 The durable response is replayed verbatim for retries; a later account balance, plan or schema does not rewrite it. A receipt hash is an identifier/integrity input, not a proof that the implementation executed the contract correctly.
+
+The typed evidence for a coordinated `SnapshotCut` describes the sealed IDC footprint and required authority/publication frontiers under its strong read contract. It is distinct from SPEC-005's one-group `SessionTokenV1`. Cross-group RYW, monotonic-read or causal dependencies require an explicitly qualified composite session contract and evidence transport; a C4 certificate or SDK token collection does not imply them. An unsupported session scope is rejected before speculative work can become an admission.
 
 ## 10. Failure, recovery and retention
 
@@ -293,7 +308,7 @@ The durable response is replayed verbatim for retries; a later account balance, 
 | Crash before durable `Reserved` | No positive vote exists; retry/status consults the transaction decision authority |
 | Crash after `Reserved` | Reconstruct reservations; resolve transaction before conflicting admission |
 | Crash after `PreparedYes` | Retain prepared bytes and reservations; recover `IN_DOUBT` until durable decision evidence arrives |
-| Lost final response | Same `TxnId` and request hash resolve to the durable original outcome/result |
+| Lost final response | Same RequestKey and request hash resolve to the original TxnId and exact receipt even if the client never learned TxnId |
 | Certifier quorum partition | No new certification through an authority that cannot establish quorum leadership |
 | Participant quorum unavailable | Do not fabricate its vote; existing prepared work can remain blocked |
 | Commit durable, install incomplete | Retry installation; retain reservations; expose pending publication status |
@@ -302,7 +317,7 @@ The durable response is replayed verbatim for retries; a later account balance, 
 
 `UNKNOWN`, `IN_DOUBT`, an elapsed timeout and a missing cache entry are not evidence of abort. Prepared state MUST NOT expire by TTL. A successful authoritative abort decision may be initiated before a final decision exists, including after a client deadline; a participant cannot decide that alone.
 
-GC SHALL retain prepared batches, reservations, token metadata, immutable results, decision references, publication evidence and all required old plans until the relevant protocol/snapshot/replication/retry horizons pass. Detailed result retention may be bounded by the advertised retry contract, but an expired identity must remain fenced against reexecution. A request outside that horizon returns `RetryIdentityExpired`, not a new execution.
+GC SHALL retain request-home mappings or authoritative references, prepared batches, reservations, token metadata, immutable results, decision references, publication evidence and all required old plans until the relevant protocol/snapshot/replication/retry horizons pass under SPEC-011. Detailed result retention may be bounded by the advertised retry contract, but an expired identity must remain fenced against reexecution. A request outside that horizon returns SPEC-012 `IdentityExpired`, not a new execution.
 
 Resource exhaustion MUST reject or throttle new admission before destroying unresolved state. Metrics must identify the oldest unresolved transaction and pinned bytes without exposing user values.
 
@@ -332,13 +347,13 @@ New invariants must validate both present state and live obligations such as con
 Required typed errors/statuses include:
 
 ```text
-IdentityConflict; UnsupportedCertification; UnsafeSequentialContract
+RequestIdentityMismatch; IdentityConflict; UnsupportedCertification; UnsafeSequentialContract
 StalePlan; StaleSchema; StaleAuthority; MembershipChanged
 SnapshotExpired; VersionConflict; PredicateConflict
 IncompletePredicateCoverage; MissingInvariantWitness; UnfencedWriter
 PreconditionRejected; PostconditionRejected; InvariantRejected
 ArithmeticError; ReservationConflict; AuthorityUnavailable
-TxnInDoubt; CommittedPendingPublication; RetryIdentityExpired
+TxnInDoubt; CommittedPendingPublication; IdentityExpired; SessionScopeMismatch
 ProtocolCorruption; ResourceExhausted
 ```
 
@@ -382,17 +397,21 @@ These are required test cases, not results already achieved. SPEC-010 owns execu
 | C4-014 | State guard differs from persistent invariant | Guard is checked at its specified observation point; all declared invariants still apply |
 | C4-015 | Snapshot/token horizon expires or revision approaches overflow | Explicit retry/fencing; no accidental evidence reuse |
 | C4-016 | Incompatible result contract or unsafe sequential operation | Compiler/runtime rejects; extra coordination does not bless the operation |
+| C4-017 | Race request-home CAS and certification at two ingress nodes; lose reply before client learns TxnId | One request mapping/execution and exact receipt; changed request content returns RequestIdentityMismatch |
+| C4-018 | Swap IDC generation and authority epoch; restore a token across placement/storage changes; forge certifier evidence | Typed binding, catalog admission and authentication reject without releasing another transaction's reservations |
+| C4-019 | Request group-spanning session guarantees using one C2 token or an unqualified composite read plan | Scope rejects before certification; a strong snapshot alone does not claim an unspecified cross-group session |
+| C4-020 | Encode receipt/prepare with unknown mandatory semantics or downgrade after preparation | SPEC-012 fails closed while retaining historical result, prepared bytes and reservations for compatible resolution |
 
-Small executable models SHALL enumerate duplicate/reordered messages, leader changes, crash recovery and publication races. The safety target is an obligation: every admitted observable history refines its contract under the stated failure model. Passing a finite test suite is evidence, not a universal proof.
+Small executable models SHALL enumerate duplicate/reordered messages, leader changes, crash recovery and publication races. SPEC-010 FM-2 requires a checked decision/publication model, passing deterministic simulation and passing real-process fault campaign before a distributed C4 correctness claim; evolution additionally requires FM-3. The safety target is an obligation: every admitted observable history refines its contract under the stated failure model. Passing a finite test suite is evidence, not a universal proof.
 
 ## 14. Milestones
 
 | Milestone | Deliverable | Exit criterion |
 |---|---|---|
-| C4-A | Canonical read tokens and conservative domain compiler | C4-002–006, C4-014–016 pass against a sequential reference model |
+| C4-A | SPEC-011/012/013 interfaces, canonical tokens and conservative domain compiler | C4-002–006, C4-014–020 pass against the relevant reference models |
 | C4-B | Single-IDC reservations and generated validator | Concurrent histories preserve exact results, guards and invariants; C4-001/008 pass |
 | C4-C | Replicated authority, durable prepare and recovery | C4-007/009/010 pass under deterministic crash/reorder campaigns |
-| C4-D | SPEC-008 composite publication and safe reads | C4-011 passes with independent participant failures |
+| C4-D | SPEC-008 composite publication and safe reads | FM-2 model/simulator/real-process gates and C4-011 pass with independent participant failures |
 | C4-E | Mixed-class and SPEC-009 transitions | C4-012/013 pass without revoking final commitments |
 | C4-F | Evaluation against equivalent C5/manual certification | Publish contention, aborts, useful successes and full coordination cost; retain C4 only if justified |
 

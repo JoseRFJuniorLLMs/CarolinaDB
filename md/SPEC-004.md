@@ -1,10 +1,11 @@
 # SPEC-004 — Coordination Compiler
 
-**Status:** Draft 0.1 — proposed implementation contract; rule soundness and runtime qualification pending  
+**Status:** Draft 0.2 — proposed implementation contract; rule soundness and runtime qualification pending  
 **Date:** 2026-09-09  
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md)  
 **Execution targets:** [SPEC-005](SPEC-005.md), [SPEC-006](SPEC-006.md), [SPEC-007](SPEC-007.md), [SPEC-008](SPEC-008.md)  
 **Evolution and qualification:** [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)  
+**Catalog, identity and security:** [SPEC-011](SPEC-011.md), [SPEC-012](SPEC-012.md), [SPEC-013](SPEC-013.md)  
 **Scope:** protocol derivation, semantic dependencies, candidate safety, plan certificates, fallback and executable plan obligations  
 **Reference implementation:** Rust stable; conceptual records are not a frozen ABI  
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY express requirements.
@@ -15,7 +16,7 @@ The compiler SHALL select from a finite, versioned library of qualified protocol
 
 This document specifies the compiler phases outlined in SPEC-001 §§15–29. SPEC-003 defines operation meaning and canonical IR; SPEC-002 defines the local durable boundary. Runtime SPECs define concrete protocol transitions. A compiler artifact alone does not establish that a runtime implements them correctly.
 
-C0–C5 are **protocol families**, not a semantic total order. The arrows in SPEC-001 §§2/19 are a search intuition, not an algorithm using numeric `max(class)`. Escrow authority, causal visibility, exact result ordering and atomic publication are different obligations. A C3 plan may also require causal scheduling; a C5 plan still needs durability, invariant evaluation, fencing and a correct observation boundary.
+C0–C5 are **protocol families**, not a semantic total order or a claimed lattice. Selection never uses numeric `max(class)`. Escrow authority, causal visibility, exact result ordering and atomic publication are different obligations. A C3 plan may also require causal scheduling; a C5 plan still needs durability, invariant evaluation, fencing and a correct observation boundary.
 
 The target is a low-coordination safe plan **within the supported template library and explicit assumptions**. This specification claims neither globally minimal coordination nor a complete decision procedure for arbitrary programs. General observable refinement across plans remains a research obligation identified by the proposal.
 
@@ -48,9 +49,9 @@ CompileOutput {
 
 All versions, rules, capabilities and topology identities are explicit inputs. A placement snapshot is an assumption to validate at admission, not perpetual authority. A live catalog route change cannot silently change a previously hashed plan.
 
-`CatalogGeneration`, `IdcGeneration`, `IdcEpoch`, `EscrowEpoch`, `StorageEpoch`, `OriginId.origin_epoch` and `LocalCommitSeq` are distinct types. Equal integer values do not make them interchangeable. The compiler refers to required epoch kinds and authority domains; runtime envelopes bind their active values. No cluster-global physical commit counter is introduced.
+SPEC-011 owns the shared type taxonomy: `CatalogGeneration`, `PlanGeneration`, `IdcGeneration`, `IdcAuthorityEpoch`, `PlacementEpoch`, `MembershipGeneration`, `ResourceGeneration`, `EscrowEpoch`, `HolderAuthorityEpoch`, `StorageEpoch`, `OriginEpoch`, `RequestHomeEpoch`, `LocalCommitSeq` and `SerialPosition` are distinct scoped types. Equal integer values do not make them interchangeable. `IdcBinding { idc_id: IdcId, idc_generation: IdcGeneration, authority_epoch: IdcAuthorityEpoch }` binds a semantic definition and its separate authority incarnation. Untyped `(IdcId, u64)` tuples are forbidden. The compiler names required authority domains; runtime envelopes bind their active values. No cluster-global physical commit counter is introduced.
 
-Compilation is side-effect free. It does not activate plans, grant rights, contact a remote payment provider or modify database records. Output is either a complete candidate artifact or typed failure. Activation follows SPEC-009 and validates existing data, state/authority migration and node capabilities.
+Compilation is side-effect free. It does not activate plans, grant rights, contact a remote payment provider or modify database records. Output is either a complete candidate artifact or typed failure. SPEC-011 registers immutable artifacts and owns publication/CAS, capability and authority admission; activation follows SPEC-009 and validates existing data, state/authority migration and node capabilities.
 
 ## 3. Execution profiles and their partial order
 
@@ -163,6 +164,10 @@ Syntactic read/write overlap does not prove semantic conflict, and different phy
 
 Every family also requires the contract's durability boundary, stable request-to-transaction identity, exact terminal result persistence and a qualified recovery path. Asynchronous replication does not automatically meet `ReplicatedStable`.
 
+C2 v1 requires that the contract's session scope and every required causal prerequisite resolve to one replication group. Cross-group `ReadYourWrites`, `MonotonicReads` or `CausalDependencies` require a separately qualified composite plan; no such C2 extension is enabled in the initial profile. Report `UnsupportedSessionScope` before effects if the supported library cannot meet it. A C5 label alone is not evidence that a foreign causal token is understood.
+
+C3 candidate profiles bind SPEC-006's `AuthorityDurabilityPolicy` and `TransferDecisionDurabilityPolicy` separately from client-result durability. Their failure-domain and recovery assumptions are included in the plan hash, compatibility checks, cost descriptor and EXPLAIN. Local-stable client outcomes do not authorize discarding replicated rights decisions or reclaiming rights after permanent evidence loss.
+
 ### 7.1 C0 is a locality claim
 
 “The record is on this node” is not proof of C0. Another node may still own rights, admit writes or return a conflicting final result. C0 requires a versioned exclusive authority assumption and admission fencing over every competing writer. Local snapshots alone do not stop write skew across two local rows. A C0 template MUST provide local serialization or complete validation for its invariant scope, even though it introduces no remote coordination during normal execution.
@@ -273,6 +278,7 @@ OperationPlan {
   operation_hash: Hash, schema_hash: Hash, contract_hash: Hash,
   invariant_set_hash: Hash, module_hash: Hash,
   catalog_generation: CatalogGeneration,
+  plan_generation: PlanGeneration,
   idc_templates: Vec<IdcTemplateRef>,
   profile: ExecutionProfile,
   routing: RoutingProgram,
@@ -292,7 +298,7 @@ There are no unchecked free-text assumptions. Every safety assumption needs an e
 
 `RoutingProgram` computes concrete keys, IDC instances and minimum participant sets from canonical arguments and the versioned placement policy. It does not authorize a participant simply because it has a replica. At admission, runtime checks active catalog/IDC generations, plan/schema/contract hashes, operation version, authority and node readiness before persistence.
 
-Execution SHALL bind the original `StableRequestId`, mapped `TxnId`, canonical arguments hash and all required captured inputs. The result program creates the exact result plus frontier/authority/durability evidence. This result is persisted with the decision and business/protocol changes through SPEC-002's atomic boundary; a crash after success must recover the result unchanged.
+Execution SHALL bind SPEC-012's original `RequestKey`, immutable `RequestHash`, mapped `TxnId`, canonical arguments and all required captured inputs. Routing to RequestHome precedes transaction allocation; execution resumes the admitted binding rather than deriving a new transaction from the current plan. The result program creates `FinalReceiptV1` with the exact result and frontier/authority/durability evidence. SPEC-002 durably binds the result payload to the decision and business/protocol changes; SPEC-008 completion evidence, where required, gates client finality. A local install ACK alone is not a final client receipt.
 
 Physical lowering MUST apply deltas under the chosen semantic handler and the storage atomic mutation boundary. Producing `Put(snapshot_x + delta)` independently on two writers is not correct C1 merely because the source IR had `Increment`. The generated plan must name the handler and its concurrency/deduplication obligations. Local commit order is neither an IDC serial order nor a causal frontier.
 
@@ -390,6 +396,8 @@ Relevant runtime failures include `StalePlan`, `StaleSchema`, `StaleEpoch`, `Ide
 | S004-A12 | Plan/certificate corruption, unknown mandatory rule versions and forged/incomplete evidence fail checking; the hash/checker distinction is exposed. |
 | S004-A13 | Golden EXPLAIN fixtures show candidate rejections, unknowns, scope, observations, durability and migration prerequisites accurately. |
 | S004-A14 | Deterministic simulation exercises the generated mixed-family plans with crash, duplicate, delayed and partitioned histories under SPEC-010 and checks exact final outcomes. |
+| S004-A15 | Cross-group sessions and foreign prerequisite tokens select a qualified explicit composite plan or `UnsupportedSessionScope`; no numeric-family fallback erases dependencies. |
+| S004-A16 | Equal numeric IDC definition/authority generations cannot be substituted; catalog/capability and independent C3 durability changes invalidate affected admission assumptions. |
 
 Milestone `CC0` implements pure input validation, closure and rule/certificate models (A01, A02, A12). `CC1` implements conservative C0/C5 templates and the reference validator (A04, A08, A09). `CC2` adds qualified C1/C2/C3 derivation, directed dependencies and joint selection (A03, A05, A07, A10). `CC3` enables C4 only after SPEC-007 qualification (A06). `CC4` integrates explanations, evolution obligations and adversarial qualification (A11, A13, A14). These refine SPEC-001 M1/M7/M8/M9; completion requires evidence, not the presence of these documents.
 
@@ -397,7 +405,7 @@ Milestone `CC0` implements pure input validation, closure and rule/certificate m
 
 | Source | Requirement carried here |
 | --- | --- |
-| SPEC-001 §§2, 15–29, 58–60, 73 | Conservative pipeline, families, directed dependencies, explicit evidence and soundness over precision; total-order shorthand is refined in §1. |
+| SPEC-001 §§2, 15–29, 58–60, 73 | Conservative pipeline, incomparable families, directed dependencies, explicit evidence and soundness over precision. |
 | SPEC-001 §§35–47, 49–53 | Observations, identity, protocol composition, catalog generations, failover and no LLM in the correctness path. |
 | SPEC-001 §§80–92 | Restricted initial prototype; C4 deferral; mixed-family and migration milestones. |
 | SPEC-002 §§38–44, 53–71, 93–109, 123–125 | Compiler owns semantic conflicts; storage owns atomic durable batches/prepares; exact identity and protocol metadata survive recovery. |
