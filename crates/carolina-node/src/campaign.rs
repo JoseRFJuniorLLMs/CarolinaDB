@@ -230,8 +230,8 @@ fn invoke_via_leader(
         if let Some(l) = wait_leader(procs, cluster, Duration::from_secs(10)) {
             if let Some(mut c) = connect(&procs[l], cluster, EndpointRole::Client) {
                 match c.invoke(inv) {
-                    Ok(ClientReplyV1::Unavailable(r)) => {
-                        last = format!("Unavailable {}: {}", r.code, r.detail);
+                    Ok(r) if r.retry_same_identity() => {
+                        last = r.kind().to_string();
                         std::thread::sleep(Duration::from_millis(150));
                         continue;
                     }
