@@ -4,9 +4,9 @@
 
 **Branch auditada:** `main`
 
-**Commit base auditado:** `cdfca6a0684c90c9b91fa2aa5fea0af5f1c7227d`
+**Commit funcional auditado:** `618cd0e42bd42ac5a9218343befd4a3581470b0b`
 
-**Árvore auditada:** commit base mais as correções consolidadas em 13/09/2026
+**Árvore auditada:** branch `main` após as correções consolidadas em 13/09/2026
 
 **Data:** 13 de setembro de 2026
 **Arquivo:** `relatorio-completo.md`
@@ -31,6 +31,7 @@ Validação local executada em Windows 11 com Rust 1.89.0, a MSRV fixada:
 | `cargo audit --file Cargo.lock --no-fetch` | PASS — 25 dependências contra 1.216 advisories em cache; nenhum achado |
 | `cargo fuzz check` | PASS — quatro harnesses coverage-guided compilam; execução local bloqueada pelo linker do sanitizer no Windows e delegada ao CI Linux |
 | `python tools/run_tlc.py` | PASS — FM-1/2/3; 3.268/348/2.816 estados distintos; nenhuma violação |
+| GitHub Actions | PASS — [run 34777875153](https://github.com/JoseRFJuniorLLMs/CarolinaDB/actions/runs/34777875153); oito jobs; Rust 1.89.0 + stable em Linux + Windows |
 
 Bundle retido da campanha rápida:
 
@@ -69,7 +70,8 @@ A auditoria recursiva encontrou e corrigiu falhas que a suíte anterior não exe
 - vínculo obrigatório entre manifest, verdict, schedule e history nos bundles;
 - escrita concorrente de bundles em diretórios distintos, sem sobrescrever evidência;
 - bloqueio do handle de storage depois de erro numa etapa durável até reabertura/recovery;
-- preservação da revisão em retry idempotente de `PutRecord` com `Expected::Absent`.
+- preservação da revisão em retry idempotente de `PutRecord` com `Expected::Absent`;
+- repetição segura de `OutcomeUnknown` com a mesma identidade na campanha C5 durante troca de líder.
 
 O achado de identidade administrativa de `LocalEngine::load_rows` foi corrigido nesta
 árvore: o hash agora cobre label, record, todas as chaves, nomes de campos e valores.
@@ -79,7 +81,7 @@ log. Há regressões para concorrência, retry exato, conflito e reinício.
 
 O relatório está completo como avaliação da árvore. O CarolinaDB continua incompleto
 como visão integral das SPECs e como produto de produção. A árvore auditada está
-localmente verde, mas ainda não há CI público verde para o commit consolidado.
+verde localmente e no CI público para o commit funcional consolidado.
 
 ---
 
@@ -103,7 +105,7 @@ A leitura correta é:
 - **Segurança de produção:** ausente.
 - **Operação de produção:** incompleta.
 - **Release engineering:** incompleta.
-- **Evidência pública de CI:** atualmente vermelha.
+- **Evidência pública de CI:** verde para o commit funcional `618cd0e`.
 
 Portanto existem dois objetivos possíveis, que não devem ser confundidos:
 
@@ -140,7 +142,9 @@ A auditoria cobriu:
 15. inspeção pontual de código crítico em transport, consensus, catalog, storage e runtime;
 16. comparação entre alegações documentais, estado do código e evidência pública.
 
-A própria auditoria existente `docs/AUDIT.md` registra uma limitação importante: dos 16 alvos auditados, a verificação adversarial independente planejada só foi concluída para um deles. Portanto, vários estados “implemented” daquela tabela significam “o auditor encontrou código + teste nominal”, não uma confirmação independente completa.
+A própria auditoria existente `docs/AUDIT.md` registra uma limitação importante: 29 dos 32
+runs adversariais planejados foram concluídos. SPEC-013 não recebeu nenhuma das duas lentes e
+SPEC-012 recebeu somente a lente de existência do código. Essas duas áreas têm a evidência mais fraca.
 
 Este relatório usa aquela auditoria como insumo, mas não a trata como autoridade infalível.
 
@@ -182,7 +186,7 @@ Esse desenho é consideravelmente mais disciplinado do que o normal para um prot
 
 ---
 
-# 4. Problema imediato: CI público continua vermelho
+# 4. CI público verificado
 
 O workflow atual contém:
 
@@ -192,65 +196,31 @@ O workflow atual contém:
 - `cargo clippy --workspace --all-targets -- -D warnings`;
 - `cargo test --workspace`;
 - `carolina qualify --quick`;
+- TLC bounded para FM-1/FM-2/FM-3;
+- RustSec;
+- quatro smoke targets libFuzzer;
 - Linux;
 - Windows;
 - upload de artefato de qualification.
 
-Isso é uma base boa.
+A execução pública verificada para o commit funcional auditado é:
 
-Entretanto, a execução pública mais recente para o commit auditado:
+- **Run:** [34777875153](https://github.com/JoseRFJuniorLLMs/CarolinaDB/actions/runs/34777875153)
+- **Commit:** `618cd0e42bd42ac5a9218343befd4a3581470b0b`
+- **Resultado:** `success`
 
-- **Run:** `34747945784`
-- **Commit:** `cdfca6a0684c90c9b91fa2aa5fea0af5f1c7227d`
-- **Resultado:** `failure`
+Todos os oito jobs passaram. As quatro combinações Rust 1.89.0/stable × Linux/Windows
+executaram fmt, Clippy com warnings negados, a suíte do workspace e a campanha rápida.
+O Linux também executou os quatro fuzzers; jobs independentes verificaram RustSec,
+spec lint e os três modelos TLA+.
 
-O job `spec-lint` passou.
+O run anterior `34777132566` revelou uma corrida na própria campanha C5: durante troca
+de líder, `OutcomeUnknown` era tratado como resultado final pelo harness. O contrato wire
+o classifica como repetível com a mesma identidade. O executor foi corrigido, passou três
+vezes consecutivas localmente e depois passou nas quatro matrizes públicas.
 
-Os jobs Rust de Linux e Windows falharam em:
-
-```text
-cargo fmt --all -- --check
-```
-
-Consequentemente foram pulados:
-
-```text
-cargo clippy
-cargo test --workspace
-carolina qualify --quick
-```
-
-O log mostra diferenças de rustfmt em arquivos como:
-
-- `crates/carolina-catalog/src/lib.rs`;
-- `crates/carolina-consensus/src/lib.rs`;
-- `crates/carolina-consensus/src/sim.rs`;
-- `crates/carolina-consensus/src/storage.rs`;
-- `crates/carolina-node/src/core.rs`.
-
-### Consequência
-
-Hoje existe evidência local documentada de testes, mas **não existe evidência pública verde para a árvore atual**.
-
-Isso deve ser corrigido antes de qualquer claim como:
-
-- “CI green”;
-- “release candidate”;
-- “production-ready”;
-- “fully qualified”.
-
-### Ação obrigatória
-
-Executar e commitar:
-
-```bash
-cargo fmt --all
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
-cargo run -p carolina-cli -- qualify --quick --out qualification
-```
-
-Depois exigir o mesmo no GitHub Actions.
+Essa evidência fecha o bloqueador de CI da auditoria. Ela não muda os gates `NOT_RUN`,
+nem transforma o protótipo em release candidate ou produto de produção.
 
 ---
 
@@ -1037,14 +1007,15 @@ Isso é muito mais sério do que um conjunto casual de unit tests.
 
 ## Lacunas
 
-### P0 — CI público verde
+### CI público verde
 
-Ainda não existe para o commit atual.
+Fechado no [run 34777875153](https://github.com/JoseRFJuniorLLMs/CarolinaDB/actions/runs/34777875153)
+para o commit funcional `618cd0e`.
 
 ### P1 — fuzz coverage-guided de longa duração
 
-Os quatro harnesses coverage-guided existem e compilam. Falta executar e reter campanhas longas;
-o smoke Linux do CI ainda não possui resultado público para esta árvore.
+Os quatro harnesses coverage-guided existem, compilam e passaram no smoke Linux público.
+Falta executar e reter campanhas longas.
 
 ### P1 — workloads W2–W8
 
@@ -1077,9 +1048,10 @@ bounded model evidence
 
 e não “formal proof”.
 
-### P1 — adversarial verification da auditoria
+### P1 — lacunas da verificação adversarial
 
-A própria `docs/AUDIT.md` informa que o plano de dois verificadores adversariais por alvo não foi concluído.
+A própria `docs/AUDIT.md` informa que 29 de 32 runs foram concluídos. Faltam as duas lentes de
+SPEC-013 e a lente de testes de SPEC-012.
 
 Isso deve virar uma campanha reprodutível, não depender de uma sessão manual.
 
@@ -1096,7 +1068,7 @@ Isso deve virar uma campanha reprodutível, não depender de uma sessão manual.
 - fmt clean;
 - spec lint PASS.
 
-Mas o GitHub Actions atual contradiz pelo menos a parte de fmt da árvore que foi efetivamente enviada.
+O GitHub Actions confirmou essas verificações para o commit funcional publicado.
 
 Portanto a hierarquia correta de confiança é:
 
@@ -1105,7 +1077,7 @@ Portanto a hierarquia correta de confiança é:
 3. log reprodutível;
 4. declaração documental.
 
-Hoje o item 1 está vermelho.
+O item 1 está verde no run `34777875153`.
 
 ---
 
@@ -1279,7 +1251,7 @@ Sem isso, “versioned protocol” fica mais forte no documento do que na opera�
 
 # 29. Commit discipline e rastreabilidade
 
-Os commits recentes aparecem repetidamente como:
+O histórico anterior contém muitos commits repetidos como:
 
 ```text
 first commit
@@ -1293,6 +1265,9 @@ Isso é ruim para:
 - blame;
 - regression isolation;
 - scientific reproducibility.
+
+As correções desta auditoria passaram a usar mensagens semânticas. A disciplina deve ser
+mantida nos próximos commits.
 
 ## Recomendação
 
@@ -1314,14 +1289,13 @@ Para um projeto cujo argumento central envolve proveniência e evidência, a his
 
 ## 30.1 README/STATUS e evidência pública
 
-README e STATUS foram sincronizados para distinguir o commit base mais recente:
+README e STATUS registram o commit funcional verificado:
 
 ```text
-cdfca6a0684c90c9b91fa2aa5fea0af5f1c7227d
+618cd0e42bd42ac5a9218343befd4a3581470b0b
 ```
 
-cujo run também falhou no fmt, da árvore local corrigida, que ainda não possui um run
-público verde.
+e o [run público verde 34777875153](https://github.com/JoseRFJuniorLLMs/CarolinaDB/actions/runs/34777875153).
 
 ## 30.2 BUILD vs Cargo.toml
 
@@ -1390,7 +1364,7 @@ O erro seria ligar mais features sem fechar a vertical atual.
 23. upgrade/rollback;
 24. backup/restore drills;
 25. TLC execution;
-26. completar adversarial verification da auditoria.
+26. completar as lentes restantes de SPEC-012 e SPEC-013.
 
 ## P2 — completar a visão científica
 
@@ -1463,12 +1437,12 @@ MVP-8 se ainda justificar o custo
 
 Antes de usar a expressão “production candidate”, exigir todos:
 
-- [ ] GitHub Actions verde no commit/tag.
-- [ ] Linux e Windows ou plataformas oficialmente suportadas.
+- [x] GitHub Actions verde no commit funcional.
+- [x] Linux e Windows nas matrizes suportadas pelo workflow.
 - [x] MSRV coerente.
 - [x] toolchain reproduzível.
 - [x] zero formatter/clippy failures localmente.
-- [ ] qualification quick PASS no CI.
+- [x] qualification quick PASS no CI.
 - [ ] standard qualification PASS em release.
 - [ ] `QI-SECURITY PASS`.
 - [ ] mTLS.
@@ -1484,7 +1458,7 @@ Antes de usar a expressão “production candidate”, exigir todos:
 - [ ] multi-host failover.
 - [ ] power-loss evidence.
 - [ ] campanhas longas de fuzzing coverage-guided (harnesses e smoke CI presentes).
-- [ ] dependency/advisory scan público (RustSec presente e scan local PASS).
+- [x] dependency/advisory scan público (RustSec).
 - [ ] SBOM.
 - [ ] signed artifacts.
 - [ ] benchmark baseline.
@@ -1550,7 +1524,7 @@ Claims que **não** devem ser usados hoje:
 - “C4 certified transactions implemented”;
 - “online evolution implemented”;
 - “formally verified” sem qualificar que os modelos são bounded;
-- “CI green”;
+- “CI green” sem identificar o commit/run;
 - “backup/restore complete”;
 - “multi-host fault tolerant proven”.
 
@@ -1566,9 +1540,10 @@ MVCC reclamation e journal retention foram implementados em 13/09.
 
 Portanto não vale gastar energia repetindo uma pendência já fechada.
 
-### 2. O CI público continua vermelho no commit atual
+### 2. O CI público encontrou uma corrida e ficou verde após a correção
 
-A documentação ainda referencia o run anterior, mas o run atual também falhou.
+O run `34777132566` expôs o tratamento incorreto de `OutcomeUnknown` no harness C5.
+Após a correção, o run `34777875153` passou nos oito jobs.
 
 ### 3. O mismatch de Rust 1.85 vs 1.89 foi corrigido
 
@@ -1586,12 +1561,13 @@ Existe material de snapshot, mas falta install/catch-up end-to-end.
 
 ### 6. Fuzz coverage-guided precisa de campanha longa
 
-Os harnesses libFuzzer existem e compilam. Falta evidência pública do smoke Linux e campanhas
+Os harnesses libFuzzer existem, compilam e passaram no smoke Linux público. Faltam campanhas
 longas com corpus e digests retidos.
 
-### 7. A auditoria gigante existente não foi adversarialmente verificada em todos os alvos
+### 7. Restam duas lacunas na verificação adversarial da auditoria
 
-Isso precisa ser transformado em processo reprodutível.
+Vinte e nove dos 32 runs foram concluídos; faltam as duas lentes de SPEC-013 e a lente de testes de
+SPEC-012. O processo completo deve ser reprodutível.
 
 ### 8. O caminho curto para produto não é MVP-4…8
 
@@ -1648,10 +1624,10 @@ O próximo salto não deveria ser inventar mais mecanismos. Deveria ser tornar o
 - [x] `cargo test --workspace` local — 181 testes na MSRV 1.89.0.
 - [x] `carolina qualify --quick` local com bundle retido.
 - [x] commit local da árvore auditada.
-- [ ] push da árvore auditada e confirmação do CI.
+- [x] push da árvore auditada e confirmação do CI — run `34777875153`.
 - [x] corrigir BUILD para `rust-version = 1.89`.
 - [x] pin de toolchain e matriz MSRV + stable.
-- [x] atualizar README/STATUS para run `cdfca6a`.
+- [x] atualizar README/STATUS para o run verde `34777875153`.
 - [x] renomear `FALTA,md` para `FALTA.md`.
 - [x] substituir a auditoria narrativa antiga pelo relatório atual.
 - [x] `cargo audit` local e RustSec no CI.

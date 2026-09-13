@@ -44,9 +44,10 @@ evolution do not exist. `present in code != implemented capability != qualified 
 The per-deliverable state, test evidence and recorded deviations live in [docs/STATUS.md](docs/STATUS.md);
 the implementation and regression audit is [docs/AUDIT.md](docs/AUDIT.md),
 and an independent narrative audit is [docs/relatorio-completo.md](docs/relatorio-completo.md).
-Public CI evidence for the current working tree does not exist yet. The later run for base commit
-`cdfca6a` also stopped at `cargo fmt --all -- --check`; this tree has since been reformatted, tested
-locally and still needs a push before those results become public CI evidence.
+Public CI for code commit `618cd0e` is green in
+[GitHub Actions run 34777875153](https://github.com/JoseRFJuniorLLMs/CarolinaDB/actions/runs/34777875153):
+Rust 1.89.0 and stable on Linux and Windows, quick qualification, spec lint, bounded TLC model
+checking, RustSec, and four Linux libFuzzer smoke targets all passed.
 
 ```bash
 cargo test --workspace

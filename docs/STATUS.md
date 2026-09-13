@@ -2,8 +2,8 @@
 
 **Updated:** 2026-09-13
 **Authoritative stage order:** [SPEC-014](../md/SPEC-014.md). This file records what exists in code and what evidence it has. It never upgrades a stage: `present in code != implemented capability != qualified capability != production-enabled capability`.
-**Requirement-level audit:** [AUDIT.md](AUDIT.md) classifies every requirement and acceptance row of SPEC-001…014 (and the owner checklists) as implemented / partial / missing against this tree (one auditor per target; the planned adversarial verification pass completed for one target only, which that file states up front); each `md/SPEC-0NN.md` header carries a one-paragraph `Implementation status (2026-09-12)` summary. An independent narrative audit of the same tree is [relatorio-completo.md](relatorio-completo.md).
-**Public CI:** the GitHub Actions run for base commit `cdfca6a` **failed** at `cargo fmt --all -- --check`, so it is not evidence for the later checks. The working tree has since been reformatted and verified locally (see "Test evidence"); a new push is needed before any public-CI claim.
+**Requirement-level audit:** [AUDIT.md](AUDIT.md) classifies every requirement and acceptance row of SPEC-001…014 (and the owner checklists) as implemented / partial / missing against the 2026-09-12 tree. Twenty-nine of 32 adversarial verifier runs completed; SPEC-013 has neither lens and SPEC-012 lacks the tests-prove-it lens. Each `md/SPEC-0NN.md` header carries a one-paragraph `Implementation status (2026-09-12)` summary. An independent narrative audit, updated with the 2026-09-13 remediation evidence, is [relatorio-completo.md](relatorio-completo.md).
+**Public CI:** [GitHub Actions run 34777875153](https://github.com/JoseRFJuniorLLMs/CarolinaDB/actions/runs/34777875153) for code commit `618cd0e` is **green**: Rust 1.89.0 and stable on Linux and Windows, quick qualification, spec lint, bounded TLC model checking, RustSec, and all four libFuzzer smoke targets passed.
 
 ## Legend
 
@@ -185,7 +185,7 @@ suite run real processes and real fsync and take about two minutes together.
 | Item | Status |
 |---|---|
 | `LICENSE` (Apache-2.0, as declared in `Cargo.toml`; owner to confirm) | ✅ file present |
-| `.github/workflows/ci.yml` (RustSec audit, spec lint, fmt, clippy `-D warnings`, tests, quick qualification campaign, four libFuzzer smoke targets; Rust 1.89 + stable on Linux + Windows) | 🟡 file present; the public run for base commit `cdfca6a` **failed at `cargo fmt --check`** (later steps skipped). Reformatted in this tree; rerun pending |
+| `.github/workflows/ci.yml` (RustSec audit, spec lint, bounded TLC, fmt, clippy `-D warnings`, tests, quick qualification campaign, four libFuzzer smoke targets; Rust 1.89 + stable on Linux + Windows) | ✅ [run 34777875153](https://github.com/JoseRFJuniorLLMs/CarolinaDB/actions/runs/34777875153) green for code commit `618cd0e`; all eight jobs passed |
 | `SECURITY.md` | ✅ |
 | `docs/BUILD.md` (build, test, qualification campaign, three-node cluster, troubleshooting) | ✅ |
 | SBOM, signed releases, reproducible-build configuration, release manifest | ⬜ |
