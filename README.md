@@ -43,10 +43,10 @@ The only distributed capability is the single-IDC C5 slice above; multi-IDC atom
 evolution do not exist. `present in code != implemented capability != qualified capability`.
 The per-deliverable state, test evidence and recorded deviations live in [docs/STATUS.md](docs/STATUS.md);
 the implementation and regression audit is [docs/AUDIT.md](docs/AUDIT.md),
-and an independent narrative audit is [docs/Relatório de Auditoria Completa do CarolinaDB.md](docs/Relat%C3%B3rio%20de%20Auditoria%20Completa%20do%20CarolinaDB.md).
-Public CI evidence for the current tree does not exist yet: the GitHub Actions run for commit
-`c98e984` failed at `cargo fmt --all -- --check` (formatting only), so clippy, the tests and the quick
-campaign were skipped there; the tree has since been reformatted and needs a new push.
+and an independent narrative audit is [docs/relatorio-completo.md](docs/relatorio-completo.md).
+Public CI evidence for the current working tree does not exist yet. The later run for base commit
+`cdfca6a` also stopped at `cargo fmt --all -- --check`; this tree has since been reformatted, tested
+locally and still needs a push before those results become public CI evidence.
 
 ```bash
 cargo test --workspace

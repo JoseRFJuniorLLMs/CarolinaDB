@@ -150,7 +150,10 @@ impl FileRaftStorage {
                     pos = start + len;
                     continue;
                 }
-                let expected = entries.last().map(|l: &Entry| l.index + 1).unwrap_or(base + 1);
+                let expected = entries
+                    .last()
+                    .map(|l: &Entry| l.index + 1)
+                    .unwrap_or(base + 1);
                 if e.index != expected {
                     return Err(CoreError::new(ErrorCode::Corruption, "raft log index gap"));
                 }

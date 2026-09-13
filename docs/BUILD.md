@@ -1,7 +1,10 @@
 # Build and verify CarolinaDB
 
-Run these commands from the repository root. The workspace targets Rust 1.85 or
-newer and uses the installed `stable` toolchain. Install the normal native linker
+Run these commands from the repository root. The workspace declares
+`rust-version = "1.89"` in `Cargo.toml`, which is the real minimum: the one-writer
+database lock uses `std::fs::File::try_lock`, stable since 1.89. `rust-toolchain.toml`
+pins local builds to `1.89.0`; CI also tests the current stable compiler on Linux and
+Windows. Toolchain upgrades therefore require an explicit source change. Install the normal native linker
 for Rust on your platform (MSVC Build Tools on Windows).
 
 ## Build

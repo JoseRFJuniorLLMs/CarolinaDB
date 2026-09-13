@@ -340,6 +340,28 @@ impl Cluster {
                 }
             }
         }
+        // compaction safety: no voter may have dropped a prefix another live voter has not yet
+        // durably applied, because v1 has no way to ship it back (SPEC-011 §9)
+        for n in &self.nodes {
+            if let Some(r) = &n.raft {
+                let base = r.snapshot_index();
+                if base == 0 {
+                    continue;
+                }
+                for other in &self.nodes {
+                    if let Some(o) = &other.raft {
+                        let applied = other.applied.last().map(|e| e.index).unwrap_or(0);
+                        if o.me() != r.me() && applied < base && o.snapshot_index() < base {
+                            return Err(format!(
+                                "compaction safety: {:?} dropped the log up to {base} while {:?} has applied only {applied}",
+                                r.me(),
+                                o.me()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         // state machine safety: applied sequences are prefix-consistent
         let mut longest: Option<&Vec<Entry>> = None;
         for n in &self.nodes {
@@ -432,6 +454,59 @@ pub fn campaign(
             return Err(format!(
                 "seed {seed}: {applied} commands applied, expected {proposals}"
             ));
+        }
+        // compaction (SPEC-011 §9): once every voter has applied, the leader drops the prefix,
+        // the cluster keeps committing across the new base and a restarted voter comes back on it
+        c.run(40)?;
+        if let Some(l) = c.leader() {
+            let horizon = c.node(l).unwrap().compaction_horizon();
+            let base = c
+                .node_mut(l)
+                .unwrap()
+                .compact(horizon)
+                .map_err(|e| e.to_string())?;
+            if base > 0 {
+                c.check_invariants()?;
+                let mut tail = last;
+                for i in (proposals + 1)..=(proposals + 3) {
+                    let mut tries = 0;
+                    loop {
+                        if let Some(idx) = c.propose(cmd(i)) {
+                            tail = idx;
+                            break;
+                        }
+                        c.run(1)?;
+                        tries += 1;
+                        if tries > 2000 {
+                            return Err(format!("seed {seed}: could not propose after compaction"));
+                        }
+                    }
+                    c.run(2)?;
+                }
+                let mut ok = false;
+                for _ in 0..3000 {
+                    c.run(1)?;
+                    if c.all_applied(tail) {
+                        ok = true;
+                        break;
+                    }
+                }
+                if !ok {
+                    return Err(format!("seed {seed}: commits stalled after compaction"));
+                }
+                c.crash(l);
+                c.run(30)?;
+                c.restart(l).map_err(|e| e.to_string())?;
+                c.run(60)?;
+                if c.node(l).unwrap().snapshot_index() != base {
+                    return Err(format!(
+                        "seed {seed}: restarted voter lost its compacted base"
+                    ));
+                }
+                c.check_invariants()?;
+                *m.entry("compacted_index".to_string()).or_insert(0) += base;
+                *m.entry("compactions".to_string()).or_insert(0) += 1;
+            }
         }
         *m.entry("delivered".to_string()).or_insert(0) += c.delivered;
         *m.entry("dropped".to_string()).or_insert(0) += c.dropped;
@@ -710,7 +785,10 @@ mod tests {
                 break;
             }
         }
-        assert!(ok, "every voter must apply before anything may be compacted");
+        assert!(
+            ok,
+            "every voter must apply before anything may be compacted"
+        );
         // the leader learns each voter's applied index from their replies
         c.run(40).unwrap();
         let leader = c.leader().unwrap_or(leader);

@@ -335,7 +335,10 @@ impl<S: RaftStorage> Raft<S> {
         self.commit_index
     }
     pub fn last_index(&self) -> u64 {
-        self.log.last().map(|e| e.index).unwrap_or(self.snapshot_index)
+        self.log
+            .last()
+            .map(|e| e.index)
+            .unwrap_or(self.snapshot_index)
     }
 
     /// First index still stored; entries below it are covered by the applied-state snapshot.
@@ -371,7 +374,10 @@ impl<S: RaftStorage> Raft<S> {
         self.log.get(self.log_pos(index)?)
     }
     fn last_term(&self) -> u64 {
-        self.log.last().map(|e| e.term).unwrap_or(self.snapshot_term)
+        self.log
+            .last()
+            .map(|e| e.term)
+            .unwrap_or(self.snapshot_term)
     }
     fn term_at(&self, index: u64) -> u64 {
         if index == self.snapshot_index {
@@ -418,8 +424,12 @@ impl<S: RaftStorage> Raft<S> {
     /// Record how far the state machine has durably applied. Lagging behind the truth is safe:
     /// it only holds the compaction horizon back.
     pub fn set_applied(&mut self, applied: u64) {
-        self.last_delivered = applied.min(self.last_index()).max(self.snapshot_index);
-        self.applied = self.applied.max(applied.min(self.last_index()));
+        // monotonic in both directions of use: a caller that reports a frontier older than what it
+        // has already been handed (because its durable image lags) must not make this node deliver
+        // the same entries twice
+        let reported = applied.min(self.last_index()).max(self.snapshot_index);
+        self.last_delivered = self.last_delivered.max(reported);
+        self.applied = self.applied.max(reported);
     }
 
     /// Test hook: pretend a follower asked for `next`, to exercise the refusal path of a peer
@@ -597,7 +607,10 @@ impl<S: RaftStorage> Raft<S> {
     }
 
     fn send_append(&mut self, to: NodeId, read_round: u64) {
-        let next = *self.next_index.get(&to).unwrap_or(&(self.snapshot_index + 1));
+        let next = *self
+            .next_index
+            .get(&to)
+            .unwrap_or(&(self.snapshot_index + 1));
         if next <= self.snapshot_index {
             // The follower needs entries this leader compacted. v1 has no snapshot transfer, so
             // this fails closed and loudly instead of sending a log the follower cannot splice
@@ -719,7 +732,12 @@ impl<S: RaftStorage> Raft<S> {
                     && (prev_log_index > self.last_index()
                         || self.term_at(prev_log_index) != prev_log_term)
                 {
-                    let hint = self.last_index().min(prev_log_index.saturating_sub(1));
+                    // never hint below the compacted base: entries under it are covered by the
+                    // applied state and can neither be compared nor re-sent
+                    let hint = self
+                        .last_index()
+                        .min(prev_log_index.saturating_sub(1))
+                        .max(self.snapshot_index);
                     let t = self.term;
                     self.send(
                         from,
@@ -736,6 +754,12 @@ impl<S: RaftStorage> Raft<S> {
                 // append new entries, truncating conflicts (never below commit_index)
                 let mut first_new: Option<usize> = None;
                 for (i, e) in entries.iter().enumerate() {
+                    // an index at or below the base is already folded into the applied state:
+                    // `entry` cannot return it, and appending it again would rebuild a prefix
+                    // this node deliberately dropped
+                    if e.index <= self.snapshot_index {
+                        continue;
+                    }
                     match self.entry(e.index) {
                         Some(mine) if mine.term == e.term => continue,
                         Some(_) => {

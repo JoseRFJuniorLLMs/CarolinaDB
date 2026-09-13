@@ -2,8 +2,8 @@
 
 **Updated:** 2026-09-13
 **Authoritative stage order:** [SPEC-014](../md/SPEC-014.md). This file records what exists in code and what evidence it has. It never upgrades a stage: `present in code != implemented capability != qualified capability != production-enabled capability`.
-**Requirement-level audit:** [AUDIT.md](AUDIT.md) classifies every requirement and acceptance row of SPEC-001…014 (and the owner checklists) as implemented / partial / missing against this tree (one auditor per target; the planned adversarial verification pass completed for one target only, which that file states up front); each `md/SPEC-0NN.md` header carries a one-paragraph `Implementation status (2026-09-12)` summary. An independent narrative audit written the same day is [Relatório de Auditoria Completa do CarolinaDB.md](Relat%C3%B3rio%20de%20Auditoria%20Completa%20do%20CarolinaDB.md).
-**Public CI:** the GitHub Actions run for commit `c98e984` (pushed 2026-09-12) **failed** at `cargo fmt --all -- --check` (formatting only), so clippy, the tests and the quick campaign did not run there. The tree has since been reformatted (`cargo fmt --all` clean) and verified locally (see "Test evidence"); a new push is needed before any public-CI claim.
+**Requirement-level audit:** [AUDIT.md](AUDIT.md) classifies every requirement and acceptance row of SPEC-001…014 (and the owner checklists) as implemented / partial / missing against this tree (one auditor per target; the planned adversarial verification pass completed for one target only, which that file states up front); each `md/SPEC-0NN.md` header carries a one-paragraph `Implementation status (2026-09-12)` summary. An independent narrative audit of the same tree is [relatorio-completo.md](relatorio-completo.md).
+**Public CI:** the GitHub Actions run for base commit `cdfca6a` **failed** at `cargo fmt --all -- --check`, so it is not evidence for the later checks. The working tree has since been reformatted and verified locally (see "Test evidence"); a new push is needed before any public-CI claim.
 
 ## Legend
 
@@ -140,9 +140,12 @@ crash matrix nth 1..=2, 3000 B+Tree ops per seed. It was re-run on this tree on 
 enabled, and still ends `overall PASS` with exit code 0: 54 W1 schedules in which 780 of 1485
 invocations committed (the campaign now fails a run that commits none, SPEC-014 §4), the crash
 matrix crashing in 19 of 26 scheduled cases with P1/P2/P3/P6/P9 held, 54 frozen codec vectors over
-25 registered kinds with 216 negative vectors refused, and the same gate set as above. The
-standard-profile figures in this paragraph were measured on 2026-09-12; reclamation does not change
-those counters, but the standard profile has not been re-run since.
+25 registered kinds with 216 negative vectors refused, and the same gate set as above. The run of
+2026-09-13 also exercises log compaction inside `Q3-CONSENSUS-SIM` (two compactions, highest base
+43): every voter applies, the leader drops the prefix, the cluster keeps committing across the new
+base and a restarted voter comes back on it. The standard-profile figures in this paragraph were
+measured on 2026-09-12; reclamation and compaction do not change those counters, but the standard
+profile has not been re-run since.
 
 ## MVP-3 — Catalog and single-IDC C5 (SPEC-008 §5/§8, SPEC-011, SPEC-012 §3/§9–§10, SPEC-013)
 
@@ -159,7 +162,8 @@ those counters, but the standard profile has not been re-run since.
 | Bootstrap through the log: genesis → home grant STAGED → ACTIVE → request route (idempotent admin ids; a new leader resumes) | ✅ | `core.rs` `leader_duties` |
 | Real-process campaign (SPEC-010 §9 subset): three `carolina-node` processes, isolated data directories, loopback; C5-001/009/010/021 and replicated determinism after killing the leader, restarting it and killing a majority | ✅ | `crates/carolina-node/src/campaign.rs`, `tests/three_nodes.rs` |
 | SPEC-013 mTLS / authorization / credential records | ⬜ **not implemented** — only the `DEV_LOCAL` plaintext, loopback-only profile exists and the node never advertises `ENCRYPTED_HOST_V1`; no security qualification is claimed. Consequently the SPEC-014 §3 exit criteria of MVP-3 ("SPEC-013 mTLS/authorization … applicable QI") are **not met** even though Q3-C5 passes |
-| Log compaction / catalog snapshots (SPEC-011 §9), dynamic membership | ⬜ (the log is replayed from index 1 at restart; membership is fixed) |
+| Catalog snapshots and Raft log compaction (SPEC-011 §9) | ✅ Each voter folds its applied state into `node.snapshot` (catalog image, applied index, decided requests, retained replies) every 64 applied entries, writes it atomically, and only then reports that frontier. Voters piggyback the frontier on `AppendEntriesReply`; the leader keeps the minimum across the membership as the compaction horizon and drops the log prefix up to it. The base (`snapshot_index`/`snapshot_term`) is written to `raft.state` before the entries are removed, so a crash in between leaves redundant entries the loader skips, never a log shorter than the base claims. A restart resumes on the base instead of replaying from index 1. Tested by the simulator (compaction plus restart, a compaction-safety invariant, a leader refusing a follower it cannot serve), by the in-process three-node cluster (image written, prefix dropped, catalog generation and grants recovered from the file) and by the qualification campaign | `crates/carolina-consensus/src/{lib,storage,sim}.rs`, `crates/carolina-node/src/core.rs` |
+| Snapshot transfer to a voter that has fallen behind the base, and dynamic membership | ⬜ Compaction is bounded by the slowest voter, so this cannot happen by lag alone; a voter whose durable state is lost must be rebuilt from outside, and the leader counts the refusals (`followers_behind_snapshot`) instead of looping |
 | QI verdict | Q: `QI-CATALOG` PASS (CAT-01/02/05/12/15/16 + closed-never-reopens); `QI-CODEC-CORPUS` PASS (52 vectors / 23 kinds; kinds of disabled features are listed as not frozen); `QI-SECURITY` NOT_RUN → gate QI NOT_RUN |
 | Q3 verdict | Q: gate **`Q3-C5` PASS** for the single-IDC C5 slice (`Q3-CONSENSUS-SIM` + `Q3-C5-PROCESS` + `QI-CATALOG` + FM-2 model within bounds); gate Q3 (C1/C2/C3 slices) NOT_RUN |
 
@@ -171,7 +175,7 @@ adapter or real-process campaign exists for them.
 
 ## Test evidence (this tree)
 
-`cargo test --workspace` on 2026-09-13 (rustc 1.96.0, Windows 11): 174 tests, all passing — core 25, lang 32 (27 unit + 5 semantic validation), compiler 22 (16 unit + 6 footprint A05), wire 7, storage 22 (3 unit + 4 B+Tree differential + 3 crash matrix/epoch + 12 kernel), runtime 12 (1 unit + 1 invariant scope + 10 end-to-end), qualify 17 (4 unit incl. the codec corpus + 8 acceptance incl. one quick campaign + 5 bundle integrity), models 4, consensus 8, catalog 3, node 16 (8 unit incl. a three-node in-process cluster + 7 configuration + 1 three real processes), cli 6 (2 unit + 4 CLI); 0 failed, 0 ignored.
+`cargo test --workspace` on 2026-09-13 (rustc 1.89.0 MSRV, Windows 11): 179 tests, all passing — core 25, lang 32 (27 unit + 5 semantic validation), compiler 22 (16 unit + 6 footprint A05), wire 7, storage 22 (3 unit + 4 B+Tree differential + 3 crash matrix/epoch + 12 kernel), runtime 13 (1 unit + 1 invariant scope + 11 end-to-end), qualify 17 (4 unit incl. the codec corpus + 8 acceptance incl. one quick campaign + 5 bundle integrity), models 4, consensus 10 (incl. compaction plus restart and a leader refusing a follower behind its base), catalog 3, node 18 (10 unit incl. seed identity, a three-node in-process cluster and the snapshot/compaction path + 7 configuration + 1 three real processes), cli 6 (2 unit + 4 CLI); 0 failed, 0 ignored.
 `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean;
 `tools/spec_lint.py` PASS (16 files). The three-process campaign and the qualification acceptance
 suite run real processes and real fsync and take about two minutes together.
@@ -181,7 +185,7 @@ suite run real processes and real fsync and take about two minutes together.
 | Item | Status |
 |---|---|
 | `LICENSE` (Apache-2.0, as declared in `Cargo.toml`; owner to confirm) | ✅ file present |
-| `.github/workflows/ci.yml` (spec lint, fmt, clippy `-D warnings`, tests, quick qualification campaign with uploaded bundle; Linux + Windows) | 🟡 file present; the public run for commit `c98e984` **failed at `cargo fmt --check`** on both runners (formatting only, later steps skipped). Reformatted in this tree; rerun pending |
+| `.github/workflows/ci.yml` (spec lint, fmt, clippy `-D warnings`, tests, quick qualification campaign with uploaded bundle; Rust 1.89 + stable on Linux + Windows) | 🟡 file present; the public run for base commit `cdfca6a` **failed at `cargo fmt --check`** (later steps skipped). Reformatted in this tree; rerun pending |
 | `SECURITY.md` | ✅ |
 | `docs/BUILD.md` (build, test, qualification campaign, three-node cluster, troubleshooting) | ✅ |
 | SBOM, signed releases, reproducible-build configuration, release manifest | ⬜ |
@@ -206,10 +210,11 @@ suite run real processes and real fsync and take about two minutes together.
 - Ordered execution is recorded as two log entries per request (`Admit`, then the admitting node's `Decision` with the receipt digest); the v1 reference path keeps the explicit protocol even though one process holds several roles (SPEC-008 §8).
 - Wire `MessageKind`s 12–14 (`Consensus`, `Admin`, `AdminReply`) were added before the codec manifest freeze; they are never accepted on client-role connections.
 - The node advertises and accepts only the `DEV_LOCAL` security profile; TLS/mTLS (SPEC-013 §3) needs a maintained TLS implementation, which is a dependency decision left to the owner.
-- Voters replay the whole log at restart (no compaction); engine steps are idempotent by request binding, so replay never re-executes a decided request.
+- Voters resume from `node.snapshot` and replay only the entries after it; engine steps stay idempotent by request binding, so replaying the tail never re-executes a decided request. The image is node-local durable state like `raft.state`: it has no registered record kind, because SPEC-012 owns the wire registry and snapshot transfer between nodes is not implemented.
 - Typed decoding is strict by construction: `Canonical::decode` re-projects the decoded value to canonical form and requires equality with the input, so unknown fields and lossy projections are refused by every decoder (found by the codec corpus: `ResolveReplyV1` had accepted unknown fields).
 - Registered record kinds whose features are disabled (snapshots, C1/C2/C3/C4, evolution, session tokens) have no codec and are reported as not frozen; enabling such a feature requires freezing its vectors first (SPEC-014 §5).
 - `Cargo.toml` declares `rust-version = "1.89"`: the portable one-writer lock uses `std::fs::File::try_lock`, stable since Rust 1.89.
+- `rust-toolchain.toml` pins local builds to `1.89.0`; CI runs both `1.89.0` and the current stable toolchain on Linux and Windows.
 - A duplicate `commit` of a transaction that already has a durable decision is a typed refusal (SPEC-002 §69), not a second install; the runtime never issues one (retries resolve by `RequestKey`), the guard exists so the kernel boundary holds on its own.
 - Key/value caps are enforced at admission, before the journal append, so a refused batch leaves nothing for recovery to replay.
 - `CandidateRejection.operation_name` is rendered as `name@version`.

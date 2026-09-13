@@ -272,6 +272,47 @@ fn changed_content_under_one_key_is_an_identity_mismatch() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn admin_seed_identity_covers_every_key_field_and_value_across_restart() {
+    let dir = temp_dir("rt-seed-identity");
+    let original_rows = [(
+        Value::Uuid(ITEM),
+        vec![
+            ("id", Value::Uuid(ITEM)),
+            ("available", Value::I64(5)),
+            ("reserved", Value::I64(0)),
+            ("total", Value::I64(5)),
+        ],
+    )];
+    let changed_rows = [(
+        Value::Uuid(ITEM),
+        vec![
+            ("id", Value::Uuid(ITEM)),
+            ("available", Value::I64(4)),
+            ("reserved", Value::I64(0)),
+            ("total", Value::I64(4)),
+        ],
+    )];
+    let mut e = LocalEngine::create(&dir, catalog(), no_faults()).unwrap();
+    let first = e.load_rows("same-label", "Item", &original_rows).unwrap();
+    let retry = e.load_rows("same-label", "Item", &original_rows).unwrap();
+    assert_eq!(retry.encode(), first.encode());
+    let err = e
+        .load_rows("same-label", "Item", &changed_rows)
+        .expect_err("changed seed content must conflict");
+    assert_eq!(err.code, ErrorCode::IdentityConflict);
+    assert_eq!(item(&mut e), (5, 0, 5));
+
+    drop(e);
+    let mut e = LocalEngine::open(&dir, catalog(), no_faults()).unwrap();
+    let err = e
+        .load_rows("same-label", "Item", &changed_rows)
+        .expect_err("the seed binding must survive restart");
+    assert_eq!(err.code, ErrorCode::IdentityConflict);
+    assert_eq!(item(&mut e), (5, 0, 5));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Crash right after the binding reached the journal (allocation durable, nothing executed).
 #[test]
 fn crash_after_allocation_reexecutes_under_the_same_txn_id() {

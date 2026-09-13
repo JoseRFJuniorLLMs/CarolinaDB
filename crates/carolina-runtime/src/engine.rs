@@ -897,11 +897,34 @@ impl LocalEngine {
             request_namespace: RequestNamespace::derive("admin-load"),
             stable_request_id: StableRequestId::derive(label),
         };
+        let canonical_rows = CanonValue::Array(
+            rows.iter()
+                .map(|(key, fields)| {
+                    CanonValue::obj()
+                        .f(
+                            "fields",
+                            CanonValue::Array(
+                                fields
+                                    .iter()
+                                    .map(|(name, value)| {
+                                        CanonValue::obj()
+                                            .fstr("name", name)
+                                            .fc("value", value)
+                                            .build()
+                                    })
+                                    .collect(),
+                            ),
+                        )
+                        .fc("key", key)
+                        .build()
+                })
+                .collect(),
+        );
         let content = CanonValue::obj()
             .fstr("kind", "admin-load")
             .fstr("label", label)
             .fstr("record", record_name)
-            .fu64("rows", rows.len() as u64)
+            .f("rows", canonical_rows)
             .build();
         let request_hash = RequestHash(domain_hash("astra.request.v1", &content.encode()));
         let plan_ref = PlanRef {

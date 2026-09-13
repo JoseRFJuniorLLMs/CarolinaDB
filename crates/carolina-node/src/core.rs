@@ -13,13 +13,12 @@ use std::time::Duration;
 
 use carolina_catalog::{
     AuthorityGrant, Catalog, CatalogCommand, CatalogKey, CatalogSnapshot, Expected, GrantState,
-    LogCommand,
-    Mutation, Predicate, RequestRoute,
+    LogCommand, Mutation, Predicate, RequestRoute,
 };
 use carolina_consensus::{Config, Envelope, FileRaftStorage, Raft, ReadIndex, Role};
 use carolina_core::canon::{CanonValue, Canonical};
 use carolina_core::error::{CoreError, CoreResult, ErrorCode};
-use carolina_core::hash::Hash256;
+use carolina_core::hash::{domain_hash, Hash256};
 use carolina_core::ids::*;
 use carolina_core::limits::Limits;
 use carolina_runtime::engine::{EngineOptions, LocalEngine};
@@ -52,6 +51,11 @@ struct PendingAdmin {
     waiters: Vec<Waiter>,
 }
 
+struct PendingSeed {
+    command_hash: Hash256,
+    waiters: Vec<Waiter>,
+}
+
 pub struct NodeCore {
     cfg: NodeConfig,
     me: NodeId,
@@ -71,7 +75,7 @@ pub struct NodeCore {
     last_exec: BTreeMap<RequestKey, ClientReplyV1>,
     invoke_waiters: BTreeMap<RequestKey, PendingInvoke>,
     admin_waiters: BTreeMap<AdminRequestId, PendingAdmin>,
-    seed_waiters: BTreeMap<String, Vec<Waiter>>,
+    seed_waiters: BTreeMap<String, PendingSeed>,
     resolve_waiters: Vec<(u64, Waiter, ResolveRequestV1)>,
     ready_reads_backlog: Vec<ReadIndex>,
     decision_proposals: BTreeMap<RequestKey, u64>,
@@ -101,6 +105,11 @@ fn refusal(code: &str, detail: String) -> ClientReplyV1 {
 struct NodeSnapshot {
     applied_index: u64,
     catalog: CatalogSnapshot,
+    /// Requests whose decision this voter has applied, and the exact reply each one produced.
+    /// Without them a restarted voter that skips the compacted prefix would answer a retry by
+    /// re-deriving the reply instead of returning the one the cluster already published.
+    decided: Vec<RequestKey>,
+    last_exec: Vec<(RequestKey, ClientReplyV1)>,
 }
 
 impl NodeSnapshot {
@@ -110,7 +119,20 @@ impl NodeSnapshot {
         CanonValue::obj()
             .fu64("applied_index", self.applied_index)
             .fc("catalog", &self.catalog)
+            .f(
+                "decided",
+                CanonValue::Array(self.decided.iter().map(|k| k.to_canon()).collect()),
+            )
             .fstr("kind", "node_snapshot.v1")
+            .f(
+                "last_exec",
+                CanonValue::Array(
+                    self.last_exec
+                        .iter()
+                        .map(|(k, r)| CanonValue::obj().fc("key", k).fc("reply", r).build())
+                        .collect(),
+                ),
+            )
             .fu32("snapshot_version", Self::VERSION)
             .build()
             .encode()
@@ -118,7 +140,14 @@ impl NodeSnapshot {
 
     fn decode(bytes: &[u8]) -> CoreResult<NodeSnapshot> {
         let v = CanonValue::decode(bytes, &Limits::v1())?;
-        v.expect_fields(&["applied_index", "catalog", "kind", "snapshot_version"])?;
+        v.expect_fields(&[
+            "applied_index",
+            "catalog",
+            "decided",
+            "kind",
+            "last_exec",
+            "snapshot_version",
+        ])?;
         let version = v.field("snapshot_version")?.as_u32()?;
         if version != Self::VERSION {
             return Err(CoreError::new(
@@ -126,9 +155,23 @@ impl NodeSnapshot {
                 format!("node snapshot version {version}"),
             ));
         }
+        let mut last_exec = Vec::new();
+        for e in v.field("last_exec")?.as_array()? {
+            last_exec.push((
+                RequestKey::from_canon(e.field("key")?)?,
+                ClientReplyV1::from_canon(e.field("reply")?)?,
+            ));
+        }
         Ok(NodeSnapshot {
             applied_index: v.field("applied_index")?.as_u64()?,
             catalog: CatalogSnapshot::from_canon(v.field("catalog")?)?,
+            decided: v
+                .field("decided")?
+                .as_array()?
+                .iter()
+                .map(RequestKey::from_canon)
+                .collect::<CoreResult<Vec<_>>>()?,
+            last_exec,
         })
     }
 
@@ -159,8 +202,12 @@ impl NodeSnapshot {
 }
 
 /// Entries applied between two durable images. Small enough that a restart replays little, large
-/// enough that the image is not rewritten for every request.
+/// enough that the image is not rewritten for every request. Tests use a small interval so that a
+/// handful of requests exercises the same snapshot and compaction path.
+#[cfg(not(test))]
 const SNAPSHOT_EVERY: u64 = 64;
+#[cfg(test)]
+const SNAPSHOT_EVERY: u64 = 4;
 
 impl NodeCore {
     fn open(
@@ -198,9 +245,14 @@ impl NodeCore {
         // recover the control plane from the last image, then let the log replay only what came
         // after it (the engine recovers its own durable state)
         let snapshot = NodeSnapshot::load(&data)?;
-        let (catalog, applied_index) = match &snapshot {
-            Some(s) => (Catalog::restore(&s.catalog), s.applied_index),
-            None => (Catalog::new(), 0),
+        let (catalog, applied_index, decided, last_exec) = match &snapshot {
+            Some(s) => (
+                Catalog::restore(&s.catalog),
+                s.applied_index,
+                s.decided.iter().copied().collect::<BTreeSet<_>>(),
+                s.last_exec.iter().cloned().collect::<BTreeMap<_, _>>(),
+            ),
+            None => (Catalog::new(), 0, BTreeSet::new(), BTreeMap::new()),
         };
         let storage = FileRaftStorage::open(&data.join("raft"))?;
         let mut rcfg = Config::new(cfg.manifest.voters.clone());
@@ -230,8 +282,8 @@ impl NodeCore {
             snapshot_dir: data,
             entries_since_snapshot: 0,
             snapshot_index: applied_index,
-            decided: BTreeSet::new(),
-            last_exec: BTreeMap::new(),
+            decided,
+            last_exec,
             invoke_waiters: BTreeMap::new(),
             admin_waiters: BTreeMap::new(),
             seed_waiters: BTreeMap::new(),
@@ -555,6 +607,12 @@ impl NodeCore {
         let snap = NodeSnapshot {
             applied_index: self.applied_index,
             catalog: self.catalog.snapshot(),
+            decided: self.decided.iter().copied().collect(),
+            last_exec: self
+                .last_exec
+                .iter()
+                .map(|(k, r)| (*k, r.clone()))
+                .collect(),
         };
         if let Err(e) = snap.save(&self.snapshot_dir) {
             self.fail(format!("node snapshot failed: {e}"));
@@ -606,6 +664,15 @@ impl NodeCore {
                 record,
                 rows,
             } => {
+                let command_hash = domain_hash(
+                    "astra.admin-seed.v1",
+                    &NodeCommand::Seed {
+                        label: label.clone(),
+                        record: record.clone(),
+                        rows: rows.clone(),
+                    }
+                    .encode(),
+                );
                 let refs: Vec<(
                     carolina_lang::types::Value,
                     Vec<(&str, carolina_lang::types::Value)>,
@@ -618,14 +685,32 @@ impl NodeCore {
                         )
                     })
                     .collect();
-                self.engine.load_rows(&label, &record, &refs)?;
-                if let Some(ws) = self.seed_waiters.remove(&label) {
-                    for w in ws {
-                        self.reply(
-                            &w,
-                            MessageKind::AdminReply,
-                            AdminReply::Seeded { log_index: index }.encode(),
-                        );
+                let result = self.engine.load_rows(&label, &record, &refs);
+                let matching_pending = self
+                    .seed_waiters
+                    .get(&label)
+                    .is_some_and(|pending| pending.command_hash == command_hash);
+                if matching_pending {
+                    let pending = self
+                        .seed_waiters
+                        .remove(&label)
+                        .expect("matching pending seed exists");
+                    let reply = match &result {
+                        Ok(_) => AdminReply::Seeded { log_index: index },
+                        Err(e) if e.code == ErrorCode::IdentityConflict => AdminReply::Refused {
+                            code: "IdentityConflict".into(),
+                            detail: e.to_string(),
+                            leader: self.raft.leader(),
+                        },
+                        Err(e) => return Err(e.clone()),
+                    };
+                    for w in pending.waiters {
+                        self.reply(&w, MessageKind::AdminReply, reply.encode());
+                    }
+                }
+                if let Err(e) = result {
+                    if e.code != ErrorCode::IdentityConflict {
+                        return Err(e);
                     }
                 }
             }
@@ -778,8 +863,8 @@ impl NodeCore {
                     );
                 }
             }
-            for (_, ws) in std::mem::take(&mut self.seed_waiters) {
-                for w in ws {
+            for (_, pending) in std::mem::take(&mut self.seed_waiters) {
+                for w in pending.waiters {
                     self.reply(
                         &w,
                         MessageKind::AdminReply,
@@ -1138,15 +1223,39 @@ impl NodeCore {
                     );
                     return;
                 }
-                match self.raft.propose(
-                    NodeCommand::Seed {
-                        label: label.clone(),
-                        record,
-                        rows,
+                let command = NodeCommand::Seed {
+                    label: label.clone(),
+                    record,
+                    rows,
+                };
+                let command_hash = domain_hash("astra.admin-seed.v1", &command.encode());
+                if let Some(pending) = self.seed_waiters.get_mut(&label) {
+                    if pending.command_hash == command_hash {
+                        pending.waiters.push(w);
+                    } else {
+                        self.reply(
+                            &w,
+                            MessageKind::AdminReply,
+                            AdminReply::Refused {
+                                code: "IdentityConflict".into(),
+                                detail: "seed label has different command bytes in flight".into(),
+                                leader: self.raft.leader(),
+                            }
+                            .encode(),
+                        );
                     }
-                    .encode(),
-                ) {
-                    Ok(_) => self.seed_waiters.entry(label).or_default().push(w),
+                    return;
+                }
+                match self.raft.propose(command.encode()) {
+                    Ok(_) => {
+                        self.seed_waiters.insert(
+                            label,
+                            PendingSeed {
+                                command_hash,
+                                waiters: vec![w],
+                            },
+                        );
+                    }
                     Err(e) => self.reply(
                         &w,
                         MessageKind::AdminReply,

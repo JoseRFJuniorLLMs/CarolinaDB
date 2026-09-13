@@ -239,6 +239,88 @@ fn concurrent_admin_retries_match_command_bytes_before_sharing_the_result() {
 }
 
 #[test]
+fn seed_retries_share_only_identical_content_and_conflicts_do_not_fail_the_node() {
+    let mut cluster = Cluster::new();
+    let receiver = cluster.listen(0, 1);
+    let seed = AdminRequest::Seed {
+        label: "seed-identity".into(),
+        record: "Item".into(),
+        rows: vec![(
+            Value::Uuid([0x44; 16]),
+            vec![
+                ("id".into(), Value::Uuid([0x44; 16])),
+                ("available".into(), Value::I64(7)),
+                ("reserved".into(), Value::I64(0)),
+                ("total".into(), Value::I64(7)),
+            ],
+        )],
+    };
+    let mut changed = seed.clone();
+    if let AdminRequest::Seed { rows, .. } = &mut changed {
+        rows[0].1[1].1 = Value::I64(8);
+        rows[0].1[3].1 = Value::I64(8);
+    }
+
+    cluster.node(0).handle_admin(
+        Waiter {
+            conn: 1,
+            stream_id: 1,
+        },
+        seed.encode(),
+    );
+    let proposed_index = cluster.node(0).raft.last_index();
+    cluster.node(0).handle_admin(
+        Waiter {
+            conn: 1,
+            stream_id: 2,
+        },
+        changed.encode(),
+    );
+    assert!(
+        matches!(admin_reply(&receiver), (2, AdminReply::Refused { code, .. }) if code == "IdentityConflict")
+    );
+    cluster.node(0).handle_admin(
+        Waiter {
+            conn: 1,
+            stream_id: 3,
+        },
+        seed.encode(),
+    );
+    assert_eq!(cluster.node(0).raft.last_index(), proposed_index);
+    cluster.pump(20, true);
+    assert!(matches!(
+        admin_reply(&receiver),
+        (1, AdminReply::Seeded { .. })
+    ));
+    assert!(matches!(
+        admin_reply(&receiver),
+        (3, AdminReply::Seeded { .. })
+    ));
+
+    cluster.node(0).handle_admin(
+        Waiter {
+            conn: 1,
+            stream_id: 4,
+        },
+        changed.encode(),
+    );
+    cluster.pump(20, true);
+    assert!(
+        matches!(admin_reply(&receiver), (4, AdminReply::Refused { code, .. }) if code == "IdentityConflict")
+    );
+    for node in cluster.nodes.iter_mut().flatten() {
+        assert!(node.failure.is_none(), "{:?}", node.failure);
+        let row = node
+            .engine
+            .read_row("Item", &Value::Uuid([0x44; 16]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row["available"], Value::I64(7));
+        assert_eq!(row["total"], Value::I64(7));
+    }
+}
+
+#[test]
 fn preceding_grant_closure_refuses_queued_admission_and_preserves_final_retries() {
     let mut cluster = Cluster::new();
     let original = cluster.invoke("before-close", 3);
@@ -551,4 +633,89 @@ fn restarted_successor_finishes_inherited_admission_before_resolve_publishes() {
             .unwrap();
         assert_eq!(row["available"], Value::I64(7));
     }
+}
+
+/// SPEC-011 §9: a voter folds its control-plane state into a durable image, reports that frontier,
+/// and the leader then drops the log prefix every voter has applied. The image is what makes a
+/// restart correct without the prefix: the catalog generation, the grants and the admin results
+/// come back from the file, and the request receipts still resolve from the engine.
+#[test]
+fn applied_state_is_snapshotted_and_the_leader_compacts_the_prefix() {
+    let mut cluster = Cluster::new();
+    let data_dir = cluster.node(0).snapshot_dir.clone();
+
+    // enough traffic to cross the snapshot interval on every voter
+    for i in 0..6u8 {
+        // a distinct reservation id per request: repeating one is a business rejection, which
+        // would still be a decision but would not exercise the committed path
+        let inv = make_invoke(
+            &cluster.node(0).engine.catalog,
+            "tenant-c5",
+            &format!("compaction-{i}"),
+            "reserve",
+            vec![
+                Value::Uuid(ITEM),
+                Value::I64(1),
+                Value::Uuid([0x40 + i; 16]),
+            ],
+        )
+        .unwrap();
+        let receiver = cluster.listen(0, 100 + i as u64);
+        cluster.node(0).handle_invoke(
+            Waiter {
+                conn: 100 + i as u64,
+                stream_id: 1,
+            },
+            inv.encode(),
+        );
+        cluster.pump(40, true);
+        let (_, reply) = client_reply(&receiver);
+        assert!(
+            matches!(reply, ClientReplyV1::Committed(_)),
+            "request {i} must commit: {reply:?}"
+        );
+    }
+    cluster.pump(40, true);
+
+    let snapshot_path = data_dir.join("node.snapshot");
+    assert!(
+        snapshot_path.exists(),
+        "the applied state must be folded into a durable image"
+    );
+    let leader_generation = cluster.node(0).catalog.generation();
+    let base = cluster.node(0).raft.snapshot_index();
+    assert!(
+        base > 0,
+        "the leader must drop the prefix every voter has applied"
+    );
+    assert_eq!(cluster.node(0).raft.first_index(), base + 1);
+    assert!(cluster.node(0).raft.entry(base).is_none());
+    assert!(
+        cluster.node(0).raft.compaction_horizon() >= base,
+        "the horizon is bounded by the slowest voter, never by the leader alone"
+    );
+    for i in 0..3 {
+        assert!(cluster.node(i).failure.is_none());
+    }
+
+    // a restart recovers the control plane from the image instead of the prefix
+    let cfg = cluster.node(0).cfg.clone();
+    cluster.nodes[0] = None;
+    let reopened = NodeCore::open(cfg, Arc::new(Connections::default()), BTreeMap::new()).unwrap();
+    assert_eq!(
+        reopened.catalog.generation(),
+        leader_generation,
+        "the catalog must come back at the generation the image recorded"
+    );
+    assert!(
+        reopened.catalog.genesis().is_some(),
+        "genesis survives without the log prefix"
+    );
+    assert_eq!(reopened.raft.snapshot_index(), base);
+    assert_eq!(reopened.raft.first_index(), base + 1);
+    assert!(
+        reopened.applied_index >= base,
+        "the restarted voter resumes at the image, not at index 1"
+    );
+    cluster.nodes[0] = Some(reopened);
 }

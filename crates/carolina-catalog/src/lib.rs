@@ -851,7 +851,11 @@ impl Catalog {
     /// result reproduces the state the image was taken from.
     pub fn restore(s: &CatalogSnapshot) -> Catalog {
         Catalog {
-            entries: s.entries.iter().map(|e| (e.key.clone(), e.clone())).collect(),
+            entries: s
+                .entries
+                .iter()
+                .map(|e| (e.key.clone(), e.clone()))
+                .collect(),
             generation: s.generation,
             applied_index: s.applied_index,
             genesis: s.genesis.clone(),
