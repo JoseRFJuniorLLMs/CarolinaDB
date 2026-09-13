@@ -12,11 +12,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carolina_catalog::{
-    AuthorityGrant, Catalog, CatalogCommand, CatalogKey, Expected, GrantState, LogCommand,
+    AuthorityGrant, Catalog, CatalogCommand, CatalogKey, CatalogSnapshot, Expected, GrantState,
+    LogCommand,
     Mutation, Predicate, RequestRoute,
 };
-use carolina_consensus::{Config, Envelope, FileRaftStorage, Raft, ReadIndex};
-use carolina_core::canon::Canonical;
+use carolina_consensus::{Config, Envelope, FileRaftStorage, Raft, ReadIndex, Role};
+use carolina_core::canon::{CanonValue, Canonical};
 use carolina_core::error::{CoreError, CoreResult, ErrorCode};
 use carolina_core::hash::Hash256;
 use carolina_core::ids::*;
@@ -61,6 +62,11 @@ pub struct NodeCore {
     peer_tx: BTreeMap<NodeId, Sender<Envelope>>,
     conns: Arc<Connections>,
     applied_index: u64,
+    /// Where `node.snapshot` lives, how many entries have been applied since the last image and
+    /// the index that image covers.
+    snapshot_dir: std::path::PathBuf,
+    entries_since_snapshot: u64,
+    snapshot_index: u64,
     decided: BTreeSet<RequestKey>,
     last_exec: BTreeMap<RequestKey, ClientReplyV1>,
     invoke_waiters: BTreeMap<RequestKey, PendingInvoke>,
@@ -85,6 +91,76 @@ fn refusal(code: &str, detail: String) -> ClientReplyV1 {
         possibly_admitted: false,
     })
 }
+
+/// Node-local durable state a voter needs to recover without the log prefix (SPEC-011 §9).
+///
+/// The engine already holds every business effect durably and is idempotent by request binding, so
+/// only the control-plane state machine and the applied frontier have to be written here. Like
+/// `raft.state` this is node-local state, not an interchange record: it has no registered record
+/// kind and is never sent to another node.
+struct NodeSnapshot {
+    applied_index: u64,
+    catalog: CatalogSnapshot,
+}
+
+impl NodeSnapshot {
+    const VERSION: u32 = 1;
+
+    fn encode(&self) -> Vec<u8> {
+        CanonValue::obj()
+            .fu64("applied_index", self.applied_index)
+            .fc("catalog", &self.catalog)
+            .fstr("kind", "node_snapshot.v1")
+            .fu32("snapshot_version", Self::VERSION)
+            .build()
+            .encode()
+    }
+
+    fn decode(bytes: &[u8]) -> CoreResult<NodeSnapshot> {
+        let v = CanonValue::decode(bytes, &Limits::v1())?;
+        v.expect_fields(&["applied_index", "catalog", "kind", "snapshot_version"])?;
+        let version = v.field("snapshot_version")?.as_u32()?;
+        if version != Self::VERSION {
+            return Err(CoreError::new(
+                ErrorCode::UnsupportedFormat,
+                format!("node snapshot version {version}"),
+            ));
+        }
+        Ok(NodeSnapshot {
+            applied_index: v.field("applied_index")?.as_u64()?,
+            catalog: CatalogSnapshot::from_canon(v.field("catalog")?)?,
+        })
+    }
+
+    fn path(data_dir: &std::path::Path) -> std::path::PathBuf {
+        data_dir.join("node.snapshot")
+    }
+
+    /// Atomic publish: write a temporary file, fsync it, rename over the old image.
+    fn save(&self, data_dir: &std::path::Path) -> CoreResult<()> {
+        use std::io::Write;
+        let tmp = data_dir.join("node.snapshot.tmp");
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&self.encode())?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, Self::path(data_dir))?;
+        Ok(())
+    }
+
+    fn load(data_dir: &std::path::Path) -> CoreResult<Option<NodeSnapshot>> {
+        let path = Self::path(data_dir);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(NodeSnapshot::decode(&std::fs::read(path)?)?))
+    }
+}
+
+/// Entries applied between two durable images. Small enough that a restart replays little, large
+/// enough that the image is not rewritten for every request.
+const SNAPSHOT_EVERY: u64 = 64;
 
 impl NodeCore {
     fn open(
@@ -119,6 +195,13 @@ impl NodeCore {
         } else {
             LocalEngine::create(&store_dir, catalog_compiled, opts)?
         };
+        // recover the control plane from the last image, then let the log replay only what came
+        // after it (the engine recovers its own durable state)
+        let snapshot = NodeSnapshot::load(&data)?;
+        let (catalog, applied_index) = match &snapshot {
+            Some(s) => (Catalog::restore(&s.catalog), s.applied_index),
+            None => (Catalog::new(), 0),
+        };
         let storage = FileRaftStorage::open(&data.join("raft"))?;
         let mut rcfg = Config::new(cfg.manifest.voters.clone());
         rcfg.election_ticks_min = 10;
@@ -138,12 +221,15 @@ impl NodeCore {
             cfg,
             me,
             raft,
-            catalog: Catalog::new(),
+            catalog,
             engine,
             manifest_hash,
             peer_tx,
             conns,
-            applied_index: 0,
+            applied_index,
+            snapshot_dir: data,
+            entries_since_snapshot: 0,
+            snapshot_index: applied_index,
             decided: BTreeSet::new(),
             last_exec: BTreeMap::new(),
             invoke_waiters: BTreeMap::new(),
@@ -424,8 +510,14 @@ impl NodeCore {
             if self.failure.is_some() {
                 return;
             }
+            if e.index <= self.applied_index {
+                // already folded into the durable image; replaying it would be harmless (the
+                // engine is idempotent by request binding) but it is also unnecessary
+                continue;
+            }
             if e.data.is_empty() {
                 self.applied_index = e.index;
+                self.entries_since_snapshot += 1;
                 continue;
             }
             let cmd = match NodeCommand::decode(&e.data, &Limits::v1()) {
@@ -440,7 +532,47 @@ impl NodeCore {
                 return;
             }
             self.applied_index = e.index;
+            self.entries_since_snapshot += 1;
         }
+        self.checkpoint_state();
+    }
+
+    /// Publish the applied frontier and, once enough entries have accumulated, write the image and
+    /// let the leader drop the prefix every voter has applied (SPEC-011 §9).
+    ///
+    /// The image is written *before* the frontier is reported, so a voter never claims to have
+    /// applied more than it can recover. Compaction is bounded by the slowest voter, so a follower
+    /// that is merely behind is served from the log as usual.
+    fn checkpoint_state(&mut self) {
+        if self.failure.is_some() {
+            return;
+        }
+        if self.entries_since_snapshot < SNAPSHOT_EVERY {
+            // still report progress: the leader's horizon may not advance past the last image
+            self.raft.set_applied(self.snapshotted_index());
+            return;
+        }
+        let snap = NodeSnapshot {
+            applied_index: self.applied_index,
+            catalog: self.catalog.snapshot(),
+        };
+        if let Err(e) = snap.save(&self.snapshot_dir) {
+            self.fail(format!("node snapshot failed: {e}"));
+            return;
+        }
+        self.entries_since_snapshot = 0;
+        self.snapshot_index = self.applied_index;
+        self.raft.set_applied(self.applied_index);
+        if self.raft.role() == Role::Leader {
+            if let Err(e) = self.raft.compact(self.applied_index) {
+                self.fail(format!("log compaction failed: {e}"));
+            }
+        }
+    }
+
+    /// Highest index covered by the last durable image.
+    fn snapshotted_index(&self) -> u64 {
+        self.snapshot_index
     }
 
     fn apply_one(&mut self, index: u64, cmd: NodeCommand) -> CoreResult<()> {
@@ -465,11 +597,7 @@ impl NodeCore {
                         }
                     };
                     for w in pending.waiters {
-                        self.reply(
-                            &w,
-                            MessageKind::AdminReply,
-                            reply.encode(),
-                        );
+                        self.reply(&w, MessageKind::AdminReply, reply.encode());
                     }
                 }
             }
@@ -501,7 +629,11 @@ impl NodeCore {
                     }
                 }
             }
-            NodeCommand::Admit { invoke, admitted_by, catalog_generation } => {
+            NodeCommand::Admit {
+                invoke,
+                admitted_by,
+                catalog_generation,
+            } => {
                 let key = invoke.content.request_key;
                 // Catalog transitions preceding this entry may revoke admission after the
                 // leader queued it. Recheck in log order on every voter before any new effect.
@@ -509,7 +641,11 @@ impl NodeCore {
                 if !self.last_exec.contains_key(&key)
                     && !self.admission_authorized(&invoke, admitted_by, catalog_generation)
                 {
-                    if self.invoke_waiters.get(&key).is_some_and(|p| p.request_hash == invoke.request_hash) {
+                    if self
+                        .invoke_waiters
+                        .get(&key)
+                        .is_some_and(|p| p.request_hash == invoke.request_hash)
+                    {
                         self.reply_invoke_waiters(&key, &refusal("AuthorityUnavailable",
                             "route or grant no longer authorizes admission at this log position".into()));
                     }
@@ -684,14 +820,23 @@ impl NodeCore {
         )
     }
 
-    fn admission_authorized(&self, inv: &InvokeV1, admitted_by: NodeId, generation: CatalogGeneration) -> bool {
-        if generation.0 == 0 || generation > self.catalog.generation()
+    fn admission_authorized(
+        &self,
+        inv: &InvokeV1,
+        admitted_by: NodeId,
+        generation: CatalogGeneration,
+    ) -> bool {
+        if generation.0 == 0
+            || generation > self.catalog.generation()
             || !self.cfg.manifest.voters.contains(&admitted_by)
         {
             return false;
         }
         let key = inv.content.request_key;
-        let Some(route) = self.catalog.route(key.tenant_id, key.request_namespace, ROUTE_BUCKET) else {
+        let Some(route) = self
+            .catalog
+            .route(key.tenant_id, key.request_namespace, ROUTE_BUCKET)
+        else {
             return false;
         };
         let Some(grant) = self.catalog.grant(route.home_grant) else {
@@ -702,10 +847,16 @@ impl NodeCore {
         };
         route.home_id == self.cfg.home_id()
             && route.home_epoch == RequestHomeEpoch(1)
-            && grant.binding == AuthorityBinding::RequestHome { home_id: route.home_id, epoch: route.home_epoch }
+            && grant.binding
+                == AuthorityBinding::RequestHome {
+                    home_id: route.home_id,
+                    epoch: route.home_epoch,
+                }
             && grant.tenant == key.tenant_id
             && grant.plans.contains(&plan.plan_ref())
-            && self.catalog.admission_allowed(route.home_grant, admitted_by)
+            && self
+                .catalog
+                .admission_allowed(route.home_grant, admitted_by)
     }
 
     fn handle_invoke(&mut self, w: Waiter, payload: Vec<u8>) {
@@ -750,14 +901,14 @@ impl NodeCore {
         }
         // SPEC-011 §5 admission: route + active grant + admitted node
         if !self.admission_authorized(&inv, self.me, self.catalog.generation()) {
-                self.reply_client(
-                    &w,
-                    &refusal(
-                        "AuthorityUnavailable",
-                        "no active route/grant for this namespace at this home".into(),
-                    ),
-                );
-                return;
+            self.reply_client(
+                &w,
+                &refusal(
+                    "AuthorityUnavailable",
+                    "no active route/grant for this namespace at this home".into(),
+                ),
+            );
+            return;
         }
         if let Some(pending) = self.invoke_waiters.get_mut(&key) {
             if pending.request_hash != inv.request_hash {
@@ -933,16 +1084,30 @@ impl NodeCore {
                     if pending.command_hash == command_hash {
                         pending.waiters.push(w);
                     } else {
-                        self.reply(&w, MessageKind::AdminReply, AdminReply::Refused {
-                            code: "IdentityConflict".into(),
-                            detail: "admin request id has different command bytes in flight".into(),
-                            leader: self.raft.leader(),
-                        }.encode());
+                        self.reply(
+                            &w,
+                            MessageKind::AdminReply,
+                            AdminReply::Refused {
+                                code: "IdentityConflict".into(),
+                                detail: "admin request id has different command bytes in flight"
+                                    .into(),
+                                leader: self.raft.leader(),
+                            }
+                            .encode(),
+                        );
                     }
                     return;
                 }
                 match self.raft.propose(NodeCommand::Catalog(cmd).encode()) {
-                    Ok(_) => { self.admin_waiters.insert(id, PendingAdmin { command_hash, waiters: vec![w] }); }
+                    Ok(_) => {
+                        self.admin_waiters.insert(
+                            id,
+                            PendingAdmin {
+                                command_hash,
+                                waiters: vec![w],
+                            },
+                        );
+                    }
                     Err(e) => self.reply(
                         &w,
                         MessageKind::AdminReply,

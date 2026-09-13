@@ -149,7 +149,9 @@ pub fn validate_test_root(root: &Path, test_root: &Path) -> Result<PathBuf, Conf
 
 pub fn validate_config(cfg: &CampaignConfig) -> Result<PathBuf, ConfigError> {
     if cfg.seeds.is_empty() {
-        return Err(ConfigError::InvalidBudget("at least one seed is required".into()));
+        return Err(ConfigError::InvalidBudget(
+            "at least one seed is required".into(),
+        ));
     }
     for (name, value) in [
         ("ops_per_schedule", cfg.ops_per_schedule as u64),
@@ -160,7 +162,9 @@ pub fn validate_config(cfg: &CampaignConfig) -> Result<PathBuf, ConfigError> {
         ("model_state_budget", cfg.model_state_budget as u64),
     ] {
         if value == 0 {
-            return Err(ConfigError::InvalidBudget(format!("{name} must be greater than zero")));
+            return Err(ConfigError::InvalidBudget(format!(
+                "{name} must be greater than zero"
+            )));
         }
     }
     match cfg.durability_mode.as_str() {
@@ -858,10 +862,19 @@ pub fn run_campaign(cfg: &CampaignConfig) -> Result<CampaignReport, ConfigError>
             cfg.crash_nth_max,
             cfg.checker_budget
         );
+        // SPEC-014 §4: usefulness is measured separately from safety. A campaign that refuses or
+        // rejects every invocation satisfies the checker vacuously, so it can never be a PASS.
+        let committed = *w1_metrics.get("w1.committed").unwrap_or(&0);
+        let attempts = *w1_metrics.get("w1.attempts").unwrap_or(&0);
         checks.push(match (w1_fail, w1_inconclusive) {
             (Some(f), _) => CheckResult::fail("Q2-W1-LOCAL", scope, f),
             (None, Some(i)) => CheckResult::inconclusive("Q2-W1-LOCAL", scope, i),
-            (None, None) => CheckResult::pass("Q2-W1-LOCAL", scope, format!("{w1_runs} schedules: Q-C01/02/03/04/05/13/14 held against the independent W1 oracle; every receipt resolved identically after recovery")),
+            (None, None) if committed == 0 => CheckResult::fail(
+                "Q2-W1-LOCAL",
+                scope,
+                format!("no useful progress: 0 of {attempts} invocations committed over {w1_runs} schedules (SPEC-014 §4)"),
+            ),
+            (None, None) => CheckResult::pass("Q2-W1-LOCAL", scope, format!("{w1_runs} schedules, {committed} of {attempts} invocations committed: Q-C01/02/03/04/05/13/14 held against the independent W1 oracle; every receipt resolved identically after recovery")),
         });
     } else {
         checks.push(CheckResult::not_run(

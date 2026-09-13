@@ -33,7 +33,7 @@ use carolina_storage::testutil::{batch, decision_ref, prepare_batch, receipt, re
 use carolina_wire::negotiation::{EndpointRole, LocalCapabilities};
 use carolina_wire::records::*;
 use carolina_wire::registry::REGISTERED_KINDS;
-use carolina_wire::snapshot::CodecManifest;
+use carolina_wire::snapshot::{CodecManifest, SnapshotChunkV1, SnapshotKind, SnapshotManifestV1};
 
 pub struct CodecVector {
     pub name: String,
@@ -582,6 +582,43 @@ pub fn vectors() -> Vec<CodecVector> {
         },
     };
     out.push(vec_of("consensus_envelope.request_vote", None, &vote));
+
+    // SPEC-012 §11 snapshot interchange: the manifest and chunk codecs exist (the store-level
+    // export/import does not), so their canonical bytes are frozen like every other enabled codec.
+    let chunk = SnapshotChunkV1 {
+        snapshot_id: [9u8; 16],
+        index: 0,
+        records: vec![
+            carolina_wire::registry::CanonicalRecord::wrap("result_tombstone", &tomb).unwrap(),
+        ],
+    };
+    let manifest = SnapshotManifestV1 {
+        snapshot_id: [9u8; 16],
+        snapshot_version: 1,
+        cluster_id: ClusterId::derive("corpus-cluster"),
+        tenant_scope: vec![TenantId::derive("tenant")],
+        kind: SnapshotKind::LocalStorage,
+        source_identity: StorageId::derive("corpus-storage"),
+        source_storage_epoch: StorageEpoch(1),
+        catalog_generation: CatalogGeneration(3),
+        plan_refs: vec![],
+        idc_bindings: vec![],
+        membership_generation: MembershipGeneration(1),
+        semantic_cut_with_holes: CanonValue::Null,
+        required_codec_manifest: CodecManifest::v1().manifest_hash(),
+        required_artifact_refs: vec![],
+        request_namespace_retirements: vec![],
+        retained_result_horizons: CanonValue::Null,
+        unresolved_protocol_refs: vec![],
+        authority_fences: vec![],
+        chunks: vec![chunk.descriptor()],
+    };
+    out.push(vec_of(
+        "snapshot_manifest",
+        Some("snapshot_manifest"),
+        &manifest,
+    ));
+    out.push(vec_of("snapshot_chunk", Some("snapshot_chunk"), &chunk));
     out
 }
 

@@ -1,6 +1,7 @@
 # SPEC-001 — Invariant-Compiled Consistency
 
 **Status:** Draft 0.2 — proposed architecture; implementation, qualification and research proof remain open
+**Implementation status (2026-09-12):** Implemented and tested: the M0 semantic core (§§7–14), the M1 conservative compiler (§§15–19, C0/C5 only), the M2 local durable slice (§§26–35 local) and the single-IDC half of M6 (§88, three-process C5). Missing: C1–C4 runtimes, multi-IDC publication (§47), evolution (§§41–42), SPEC-013 security (§52), observability (§63), benchmarks/baselines (§§64–67) and the research evaluation H1–H5/E1–E5. Per-requirement table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Type:** Foundational architecture specification
 **Scope:** observable contracts, conservative compilation, protocol composition, authority, evolution and qualification

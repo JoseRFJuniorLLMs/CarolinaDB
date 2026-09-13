@@ -1,6 +1,7 @@
 # SPEC-009 — Plan Evolution
 
 **Status:** Draft 0.2; implementation and proof obligations remain open.
+**Implementation status (2026-09-12):** Not implemented as a protocol (SPEC-014 MVP-7; gate Q5-EVOLUTION NOT_RUN). Present: the §3 identity taxonomy, the SPEC-011 scope-lock/grant/tombstone substrate, single-generation identity and receipt preservation, and the FM-3 explicit-state model (7 of the 10 phases, five negative controls; TLC not run). Absent: MigrationRecord/CloseCertificate structs and codecs, CloseAuthority/ActivateMigration, admission fences and frontiers, drain/reconcile/transform/staging/install/activate/retire, §13 error codes, §14 CLI, metrics and every EV-01…EV-16 schedule. Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Depends on:** [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md), and the runtime contracts in [SPEC-005](SPEC-005.md)–[SPEC-008](SPEC-008.md).
 **Storage boundary:** [SPEC-002](SPEC-002.md), especially §§44, 59–71, 100–109.

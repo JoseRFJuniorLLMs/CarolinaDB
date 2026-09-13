@@ -199,6 +199,89 @@ impl Journal {
         Ok(())
     }
 
+    /// First LSN of every segment currently on disk, ascending by segment. Reads one frame header
+    /// per segment; an empty or unreadable segment is reported without a floor.
+    pub fn segment_floors(&self) -> CoreResult<Vec<(u64, Option<u64>)>> {
+        let mut segments: Vec<u64> = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let name = entry?.file_name().to_string_lossy().to_string();
+            if let Some(hex) = name
+                .strip_prefix("journal-")
+                .and_then(|s| s.strip_suffix(".astj"))
+            {
+                if let Ok(n) = u64::from_str_radix(hex, 16) {
+                    segments.push(n);
+                }
+            }
+        }
+        segments.sort_unstable();
+        let mut out = Vec::with_capacity(segments.len());
+        for seg in segments {
+            let f = SeqFile::open(&segment_path(&self.dir, seg), self.faults.clone())?;
+            let bytes = f.read_all()?;
+            drop(f);
+            let floor = match JournalFrame::decode(&bytes, MAX_JOURNAL_PAYLOAD) {
+                Ok(Some((frame, _))) => Some(frame.lsn),
+                _ => None,
+            };
+            out.push((seg, floor));
+        }
+        Ok(out)
+    }
+
+    /// The earliest segment that must survive so that a scan starting there still sees `from_lsn`
+    /// and everything after it (SPEC-002 §105). Never returns a segment after the current one.
+    pub fn first_needed_segment(&self, from_lsn: u64) -> CoreResult<u64> {
+        let mut needed = 1u64;
+        for (seg, floor) in self.segment_floors()? {
+            match floor {
+                Some(first) if first <= from_lsn => needed = needed.max(seg),
+                // an empty segment carries no frame: it cannot be the one holding `from_lsn`
+                None => {}
+                Some(_) => break,
+            }
+        }
+        Ok(needed.min(self.current_segment))
+    }
+
+    /// Delete segments strictly below `keep_from` (never the current segment). The caller MUST
+    /// have published a manifest naming `keep_from` first: a crash in the middle then leaves only
+    /// files that recovery already skips. Returns `(files removed, bytes removed)`.
+    pub fn reclaim_segments_below(&mut self, keep_from: u64) -> CoreResult<(u64, u64)> {
+        let mut files = 0u64;
+        let mut bytes = 0u64;
+        for (seg, _) in self.segment_floors()? {
+            if seg >= keep_from || seg == self.current_segment {
+                continue;
+            }
+            let path = segment_path(&self.dir, seg);
+            let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    files += 1;
+                    bytes += len;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if files > 0 {
+            crate::io::sync_dir(&self.dir)?;
+        }
+        Ok((files, bytes))
+    }
+
+    /// Bytes held by the segments still on disk.
+    pub fn retained_bytes(&self) -> CoreResult<u64> {
+        let mut total = 0u64;
+        for (seg, _) in self.segment_floors()? {
+            total += std::fs::metadata(segment_path(&self.dir, seg))
+                .map(|m| m.len())
+                .unwrap_or(0);
+        }
+        Ok(total)
+    }
+
     /// Cross the durable barrier for everything appended so far.
     pub fn sync(&mut self) -> CoreResult<()> {
         match self.mode {

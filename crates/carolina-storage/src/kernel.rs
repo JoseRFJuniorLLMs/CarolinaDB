@@ -8,6 +8,8 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use carolina_core::canon::{CanonValue, Canonical};
 use carolina_core::error::{CoreError, CoreResult, ErrorCode};
@@ -218,6 +220,10 @@ pub struct StoreOptions {
     pub cluster_id: [u8; 16],
     /// Checkpoint automatically when the pool holds this many dirty pages.
     pub auto_checkpoint_dirty_pages: usize,
+    /// Reclaim MVCC versions and journal segments at checkpoint (SPEC-002 §87–§91, §105).
+    /// Registered snapshots and prepared transactions always pin what they need; disable this to
+    /// keep the full history for differential debugging.
+    pub reclaim_at_checkpoint: bool,
 }
 
 impl Default for StoreOptions {
@@ -230,6 +236,7 @@ impl Default for StoreOptions {
             storage_id: [0u8; 16],
             cluster_id: [0u8; 16],
             auto_checkpoint_dirty_pages: 2048,
+            reclaim_at_checkpoint: true,
         }
     }
 }
@@ -248,6 +255,15 @@ pub struct Metrics {
     pub recovery_replayed_batches: u64,
     pub journal_fsync_total: u64,
     pub page_split_total: u64,
+    /// MVCC versions reclaimed by checkpoints (SPEC-002 §87–§91, §130).
+    pub mvcc_versions_reclaimed_total: u64,
+    /// Journal segments and bytes reclaimed after a checkpoint (§105, §130).
+    pub journal_segments_reclaimed_total: u64,
+    pub journal_bytes_reclaimed_total: u64,
+    /// Bytes of journal still retained after the last checkpoint.
+    pub journal_retained_bytes: u64,
+    /// Oldest sequence any registered snapshot may still read (the GC horizon).
+    pub oldest_snapshot_seq: u64,
 }
 
 pub struct Store {
@@ -265,9 +281,31 @@ pub struct Store {
     prepared: BTreeMap<TxnId, PreparedTxn>,
     snapshots: BTreeMap<u64, u32>,
     readiness: Readiness,
+    recovery_required: Arc<AtomicBool>,
     pub min_plan_generation: PlanGeneration,
     pub active_schema: Option<SchemaHash>,
     pub metrics: Metrics,
+}
+
+/// A failed durable step can leave a journal frame or a partially installed batch behind.
+/// Keep the handle fenced until reopen; neither a later success nor set_readiness can unfence it.
+struct DurableWriteGuard {
+    recovery_required: Arc<AtomicBool>,
+    completed: bool,
+}
+
+impl DurableWriteGuard {
+    fn complete(mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for DurableWriteGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.recovery_required.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 fn manifest_paths(dir: &Path) -> (PathBuf, PathBuf) {
@@ -350,6 +388,7 @@ impl Store {
             prepared: BTreeMap::new(),
             snapshots: BTreeMap::new(),
             readiness: Readiness::Ready,
+            recovery_required: Arc::new(AtomicBool::new(false)),
             min_plan_generation: PlanGeneration(0),
             active_schema: None,
             metrics: Metrics::default(),
@@ -406,6 +445,7 @@ impl Store {
             prepared: BTreeMap::new(),
             snapshots: BTreeMap::new(),
             readiness: Readiness::RecoveringLocal,
+            recovery_required: Arc::new(AtomicBool::new(false)),
             min_plan_generation: PlanGeneration(0),
             active_schema: None,
             metrics: Metrics::default(),
@@ -540,6 +580,7 @@ impl Store {
     /// a checkpoint so the manifest carries it. Registered snapshots of the old epoch are refused
     /// afterwards (`StaleEpoch`); an old epoch never serves as the current one (P10, local scope).
     pub fn advance_storage_epoch(&mut self) -> CoreResult<StorageEpoch> {
+        let durable = self.begin_durable_write()?;
         if !self.snapshots.is_empty() {
             self.snapshots.clear();
         }
@@ -554,6 +595,7 @@ impl Store {
         self.journal.sync()?;
         self.storage_epoch = next;
         self.checkpoint()?;
+        durable.complete();
         Ok(StorageEpoch(next))
     }
     pub fn durable_commit_seq(&self) -> LocalCommitSeq {
@@ -570,6 +612,24 @@ impl Store {
     }
     pub fn set_readiness(&mut self, r: Readiness) {
         self.readiness = r;
+    }
+
+    fn require_recovered(&self) -> CoreResult<()> {
+        if self.recovery_required.load(Ordering::Relaxed) {
+            return Err(CoreError::new(
+                ErrorCode::NotReady,
+                "durable operation failed; close and reopen the store to recover before further access",
+            ));
+        }
+        Ok(())
+    }
+
+    fn begin_durable_write(&self) -> CoreResult<DurableWriteGuard> {
+        self.require_recovered()?;
+        Ok(DurableWriteGuard {
+            recovery_required: Arc::clone(&self.recovery_required),
+            completed: false,
+        })
     }
 
     /// Newest committed version (any seq ≤ durable_commit_seq) as raw entry.
@@ -614,6 +674,7 @@ impl Store {
     // ---- validation --------------------------------------------------------
 
     fn validate_admission(&self, batch: &CompiledBatch) -> CoreResult<()> {
+        self.require_recovered()?;
         batch.verify()?;
         // §21: key/value caps are checked before anything is journaled, so a refused batch leaves
         // no journal record that recovery could fail to replay.
@@ -843,28 +904,24 @@ impl Store {
         seq: u64,
         lsn: u64,
         txn: [u8; 32],
-        replay: bool,
+        _replay: bool,
     ) -> CoreResult<()> {
         match pm {
             ProtocolMutation::PutRecord(w) => {
                 let lk = w.key.logical_key();
                 let rev = match &w.expected {
-                    ExpectedRecordRevision::Absent => RecordRevision(1),
-                    ExpectedRecordRevision::Exact(r) => RecordRevision(r.0 + 1),
-                };
-                let rev = if replay {
-                    // on replay the CAS was validated at original commit; derive revision from the stored predecessor if present
-                    match self
+                    ExpectedRecordRevision::Absent => match self
                         .current_value(&lk.0)?
                         .map(|v| decode_record_value(&v))
                         .transpose()?
                     {
+                        // An identical create-if-absent retry preserves the existing revision.
                         Some((cur, existing)) if existing == w.next => cur,
-                        Some((cur, _)) => RecordRevision(cur.0 + 1),
-                        None => rev,
-                    }
-                } else {
-                    rev
+                        _ => RecordRevision(1),
+                    },
+                    // The accepted CAS fixes this revision even when the payload is unchanged.
+                    // Replay must not infer it from a newer checkpoint-visible record.
+                    ExpectedRecordRevision::Exact(r) => RecordRevision(r.0 + 1),
                 };
                 let value = encode_record_value(rev, &w.next);
                 let tree = &mut self.tree;
@@ -1036,7 +1093,11 @@ impl DurableStorageKernel for Store {
     }
 
     fn readiness(&self) -> Readiness {
-        self.readiness
+        if self.recovery_required.load(Ordering::Relaxed) {
+            Readiness::Failed
+        } else {
+            self.readiness
+        }
     }
 
     fn snapshot(&mut self) -> LocalSnapshot {
@@ -1058,6 +1119,7 @@ impl DurableStorageKernel for Store {
     }
 
     fn get(&mut self, key: &LogicalKey, snap: LocalSnapshot) -> CoreResult<Option<Vec<u8>>> {
+        self.require_recovered()?;
         if snap.epoch.0 != self.storage_epoch {
             return Err(CoreError::new(
                 ErrorCode::StaleEpoch,
@@ -1086,6 +1148,7 @@ impl DurableStorageKernel for Store {
         snap: LocalSnapshot,
         limit: usize,
     ) -> CoreResult<Vec<(LogicalKey, Vec<u8>)>> {
+        self.require_recovered()?;
         if snap.epoch.0 != self.storage_epoch {
             return Err(CoreError::new(
                 ErrorCode::StaleEpoch,
@@ -1133,6 +1196,7 @@ impl DurableStorageKernel for Store {
                 "transaction has a prepared batch; use commit_prepared",
             ));
         }
+        let durable = self.begin_durable_write()?;
         let seq = self.next_seq;
         let payload = CanonValue::obj()
             .fc("batch", &batch)
@@ -1153,10 +1217,12 @@ impl DurableStorageKernel for Store {
         let evidence = Self::evidence_refs(&batch.protocol_mutations);
         let r = self.commit_result(Some(batch.txn_id), seq, lsn, evidence);
         self.maybe_auto_checkpoint()?;
+        durable.complete();
         Ok(r)
     }
 
     fn commit_protocol(&mut self, batch: ProtocolOnlyBatch) -> CoreResult<CommitResult> {
+        self.require_recovered()?;
         if self.readiness != Readiness::Ready
             && self.readiness != Readiness::WaitingProtocolReconciliation
         {
@@ -1172,6 +1238,7 @@ impl DurableStorageKernel for Store {
             .collect();
         self.validate_protocol_preconditions(&pms)?;
         self.maybe_auto_checkpoint()?;
+        let durable = self.begin_durable_write()?;
         let seq = self.next_seq;
         let payload = CanonValue::obj()
             .fc("batch", &batch)
@@ -1195,6 +1262,7 @@ impl DurableStorageKernel for Store {
             .collect();
         let r = self.commit_result(None, seq, lsn, evidence);
         self.maybe_auto_checkpoint()?;
+        durable.complete();
         Ok(r)
     }
 
@@ -1220,6 +1288,7 @@ impl DurableStorageKernel for Store {
                 "a different batch is already prepared for this transaction",
             ));
         }
+        let durable = self.begin_durable_write()?;
         fault(&self.opts.faults, FaultPoint::DuringPrepare)?;
         let payload = CanonValue::obj()
             .fc("batch", &batch)
@@ -1235,6 +1304,7 @@ impl DurableStorageKernel for Store {
         self.prepared.insert(txn, PreparedTxn { batch, lsn });
         self.metrics.prepare_total += 1;
         fault(&self.opts.faults, FaultPoint::AfterPrepareBeforeDecision)?;
+        durable.complete();
         Ok(PreparedToken {
             txn_id: txn,
             lsn: JournalLsn(lsn),
@@ -1247,6 +1317,7 @@ impl DurableStorageKernel for Store {
         token: PreparedToken,
         decision: CommitDecision,
     ) -> CoreResult<CommitResult> {
+        self.require_recovered()?;
         let p = match self.prepared.get(&token.txn_id) {
             Some(p) => p.clone(),
             None => {
@@ -1276,6 +1347,7 @@ impl DurableStorageKernel for Store {
             ));
         }
         self.maybe_auto_checkpoint()?;
+        let durable = self.begin_durable_write()?;
         let seq = self.next_seq;
         let payload = CanonValue::obj()
             .fc("decision_ref", &decision.decision_ref)
@@ -1303,10 +1375,12 @@ impl DurableStorageKernel for Store {
             self.readiness = Readiness::Ready;
         }
         self.maybe_auto_checkpoint()?;
+        durable.complete();
         Ok(r)
     }
 
     fn abort_prepared(&mut self, token: PreparedToken, decision: AbortDecision) -> CoreResult<()> {
+        self.require_recovered()?;
         let p = match self.prepared.get(&token.txn_id) {
             Some(p) => p.clone(),
             None => {
@@ -1335,6 +1409,7 @@ impl DurableStorageKernel for Store {
             ));
         }
         self.maybe_auto_checkpoint()?;
+        let durable = self.begin_durable_write()?;
         let seq = self.next_seq;
         let payload = CanonValue::obj()
             .fc("decision_ref", &decision.decision_ref)
@@ -1356,6 +1431,7 @@ impl DurableStorageKernel for Store {
         if self.prepared.is_empty() && self.readiness == Readiness::WaitingProtocolReconciliation {
             self.readiness = Readiness::Ready;
         }
+        durable.complete();
         Ok(())
     }
 
@@ -1397,6 +1473,7 @@ impl DurableStorageKernel for Store {
         &mut self,
         key: &ProtocolRecordKey,
     ) -> CoreResult<Option<(RecordRevision, VersionedProtocolRecord)>> {
+        self.require_recovered()?;
         let lk = key.logical_key();
         match self.current_value(&lk.0)? {
             Some(v) => Ok(Some(decode_record_value(&v)?)),
@@ -1405,6 +1482,7 @@ impl DurableStorageKernel for Store {
     }
 
     fn txn_status(&mut self, txn: TxnId) -> CoreResult<Option<TxnStatusRecord>> {
+        self.require_recovered()?;
         let lk = txn_status_key(txn);
         match self.current_value(&lk.0)? {
             Some(v) => Ok(Some(TxnStatusRecord::decode(&v, &Limits::v1())?)),
@@ -1414,6 +1492,7 @@ impl DurableStorageKernel for Store {
 
     /// Fuzzy checkpoint (SPEC-002 §81): CheckpointBegin → persist dirty pages (CoW) → publish manifest → CheckpointEnd.
     fn checkpoint(&mut self) -> CoreResult<CheckpointInfo> {
+        let durable = self.begin_durable_write()?;
         let target_lsn = self.journal.durable_lsn();
         let target_seq = self.durable_commit_seq;
         let begin_payload = CanonValue::obj()
@@ -1428,7 +1507,23 @@ impl DurableStorageKernel for Store {
         self.journal.sync()?;
         fault(&self.opts.faults, FaultPoint::DuringCheckpoint)?;
         let dirty_before = self.pool.dirty_count() as u64;
-        let root = {
+        // GC horizon (SPEC-002 §87–§90): the oldest sequence a registered snapshot may still read,
+        // never above the current read point. With no registered snapshot the horizon is the
+        // durable read point itself, so only superseded versions are reclaimable.
+        let oldest_snapshot = self
+            .snapshots
+            .keys()
+            .copied()
+            .min()
+            .unwrap_or(self.durable_commit_seq)
+            .min(self.durable_commit_seq);
+        self.metrics.oldest_snapshot_seq = oldest_snapshot;
+        let gc_horizon = if self.opts.reclaim_at_checkpoint {
+            Some(oldest_snapshot)
+        } else {
+            None
+        };
+        let (root, reclaimed) = {
             let tree = &mut self.tree;
             let mut ctx = TreeCtx {
                 pool: &mut self.pool,
@@ -1437,8 +1532,9 @@ impl DurableStorageKernel for Store {
                 current_lsn: begin_lsn,
                 faults: &self.opts.faults,
             };
-            tree.persist(&mut ctx)?
+            tree.persist_with_gc(&mut ctx, gc_horizon)?
         };
+        self.metrics.mvcc_versions_reclaimed_total += reclaimed;
         self.io.sync_data()?;
         self.pool.shrink_to_capacity();
         // prepared transactions pin the journal: recovery must see their PrepareBatch frames
@@ -1462,13 +1558,29 @@ impl DurableStorageKernel for Store {
             storage_id: self.opts.storage_id,
             cluster_id: self.opts.cluster_id,
         };
-        // keep the earliest segment that may still hold needed frames: we never delete segments in v1,
-        // so the manifest may reference the first segment safely.
+        // Retention (SPEC-002 §105): keep the segment that holds `checkpoint_lsn` and everything
+        // after it. `checkpoint_lsn` is already clamped below the oldest prepared frame, so
+        // prepared transactions pin the journal. The manifest is published *before* the old files
+        // are deleted, so a crash in between only leaves files recovery already skips.
+        // Safety belt: only advance the retention point when the persisted image is complete,
+        // i.e. the pool holds no dirty page the checkpoint failed to write.
+        let image_complete = self.pool.dirty_count() == 0;
+        let first_needed = if self.opts.reclaim_at_checkpoint && image_complete {
+            self.journal.first_needed_segment(checkpoint_lsn)?
+        } else {
+            self.manifest.journal_segment.max(1)
+        };
         let m = Manifest {
-            journal_segment: 1,
+            journal_segment: first_needed,
             ..m
         };
         self.publish_manifest(m)?;
+        if self.opts.reclaim_at_checkpoint && image_complete {
+            let (files, bytes) = self.journal.reclaim_segments_below(first_needed)?;
+            self.metrics.journal_segments_reclaimed_total += files;
+            self.metrics.journal_bytes_reclaimed_total += bytes;
+        }
+        self.metrics.journal_retained_bytes = self.journal.retained_bytes()?;
         let end_payload = CanonValue::obj()
             .fu64("checkpoint_lsn", checkpoint_lsn)
             .fstr("kind", "checkpoint_end")
@@ -1478,6 +1590,7 @@ impl DurableStorageKernel for Store {
             .append(JournalRecordKind::CheckpointEnd, [0u8; 32], end_payload)?;
         self.journal.sync()?;
         self.metrics.checkpoint_total += 1;
+        durable.complete();
         Ok(CheckpointInfo {
             checkpoint_lsn: JournalLsn(checkpoint_lsn),
             checkpoint_commit_seq: LocalCommitSeq(target_seq),
@@ -1488,6 +1601,7 @@ impl DurableStorageKernel for Store {
     }
 
     fn verify(&mut self, mode: VerifyMode) -> CoreResult<VerifyReport> {
+        self.require_recovered()?;
         let tree = &self.tree;
         let mut ctx = TreeCtx {
             pool: &mut self.pool,

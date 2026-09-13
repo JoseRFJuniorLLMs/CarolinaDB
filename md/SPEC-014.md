@@ -1,6 +1,7 @@
 # SPEC-014 — Implementation Profile & Vertical Slice
 
 **Status:** Draft 0.1 — implementation roadmap; no completed milestone or qualification is claimed
+**Implementation status (2026-09-12):** Stage status: MVP-0, MVP-1 and MVP-2 have their exit evidence (Q0, Q1, Q2 PASS; §4 MVP-2 schedules tested); MVP-3 is implemented for the `DEV_LOCAL` loopback profile with Q3-C5, QI-CATALOG and QI-CODEC-CORPUS PASS, but its exit criteria are NOT met because SPEC-013 mTLS/authorization is absent (gate QI NOT_RUN); MVP-4…MVP-8 not started (their FM models pass within bounds only). §5 codec vectors are frozen for enabled kinds only; no benchmark or research result (§6) exists. Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Depends on:** [SPEC-001](SPEC-001.md)–[SPEC-013](SPEC-013.md)
 **Evidence owner:** [SPEC-010](SPEC-010.md)

@@ -206,6 +206,11 @@ impl Cluster {
                 for e in r.take_committed() {
                     n.applied.push(e);
                 }
+                // the simulated state machine is durable the moment it returns, so it reports its
+                // applied frontier back: that is what lets a leader compact (SPEC-011 §9)
+                if let Some(last) = n.applied.last() {
+                    r.set_applied(last.index);
+                }
             }
         }
     }
@@ -314,16 +319,21 @@ impl Cluster {
         for a in 0..live.len() {
             for b in (a + 1)..live.len() {
                 let (ra, rb) = (live[a], live[b]);
+                // a compacted node no longer stores its prefix: compare only what both still hold
+                let first = ra.first_index().max(rb.first_index());
                 let common = ra.last_index().min(rb.last_index());
                 let mut agreed_upto = 0;
-                for i in (1..=common).rev() {
-                    let (ea, eb) = (ra.entry(i).unwrap(), rb.entry(i).unwrap());
+                for i in (first..=common).rev() {
+                    let (ea, eb) = match (ra.entry(i), rb.entry(i)) {
+                        (Some(ea), Some(eb)) => (ea, eb),
+                        _ => continue,
+                    };
                     if ea.term == eb.term {
                         agreed_upto = i;
                         break;
                     }
                 }
-                for i in 1..=agreed_upto {
+                for i in first..=agreed_upto {
                     if ra.entry(i) != rb.entry(i) {
                         return Err(format!("log matching violated at index {i}"));
                     }
@@ -352,6 +362,12 @@ impl Cluster {
             if let Some(li) = self.leader() {
                 let r = self.nodes[li].raft.as_ref().unwrap();
                 for e in l {
+                    // entries the leader compacted are covered by its applied state, which is
+                    // exactly what the snapshot base asserts; below the base there is nothing to
+                    // compare against
+                    if e.index <= r.snapshot_index() {
+                        continue;
+                    }
                     if r.entry(e.index) != Some(e) {
                         return Err(format!(
                             "leader completeness violated: leader lacks committed index {}",
@@ -393,7 +409,7 @@ pub fn campaign(
                 }
             }
             c.run(2)?;
-            if i % 7 == 0 {
+            if i.is_multiple_of(7) {
                 let victim = (i as usize) % 3;
                 c.crash(victim);
                 c.run(25)?;
@@ -632,7 +648,7 @@ mod tests {
                     c.run(1).unwrap();
                 }
                 c.run(2).unwrap();
-                if i % 7 == 0 {
+                if i.is_multiple_of(7) {
                     let victim = (i as usize) % 3;
                     c.crash(victim);
                     c.run(25).unwrap();
@@ -656,6 +672,151 @@ mod tests {
                 .collect();
             assert_eq!(a.len(), 30, "seed {seed}");
         }
+    }
+
+    /// SPEC-011 §9 / SPEC-008 §5: once every voter has durably applied a prefix, the leader may
+    /// drop it. The cluster keeps electing, replicating and committing across the new base, a
+    /// restarted voter comes back on that base instead of replaying from index 1, and a leader
+    /// never serves entries it no longer holds.
+    #[test]
+    fn compaction_drops_the_applied_prefix_and_survives_restart() {
+        let mut c = Cluster::new(
+            3,
+            41,
+            NetworkModel {
+                loss_permille: 10,
+                dup_permille: 10,
+                min_delay: 1,
+                max_delay: 3,
+            },
+        );
+        let leader = c.run_until_leader(300).unwrap().unwrap();
+        let mut last = 0;
+        for i in 1..=20u64 {
+            loop {
+                if let Some(idx) = c.propose(cmd(i)) {
+                    last = idx;
+                    break;
+                }
+                c.run(1).unwrap();
+            }
+            c.run(2).unwrap();
+        }
+        let mut ok = false;
+        for _ in 0..800 {
+            c.run(1).unwrap();
+            if c.all_applied(last) {
+                ok = true;
+                break;
+            }
+        }
+        assert!(ok, "every voter must apply before anything may be compacted");
+        // the leader learns each voter's applied index from their replies
+        c.run(40).unwrap();
+        let leader = c.leader().unwrap_or(leader);
+        let horizon = c.node(leader).unwrap().compaction_horizon();
+        assert!(
+            horizon >= last,
+            "horizon {horizon} must cover the applied prefix {last}"
+        );
+        let base = c.node_mut(leader).unwrap().compact(horizon).unwrap();
+        assert!(base >= last, "compaction must reach the horizon");
+        {
+            let r = c.node(leader).unwrap();
+            assert_eq!(r.first_index(), base + 1);
+            assert_eq!(r.snapshot_index(), base);
+            assert!(r.entry(base).is_none(), "the prefix is gone");
+            assert!(r.last_index() >= base);
+        }
+        c.check_invariants().unwrap();
+
+        // the cluster keeps working across the base
+        for i in 21..=30u64 {
+            loop {
+                if let Some(idx) = c.propose(cmd(i)) {
+                    last = idx;
+                    break;
+                }
+                c.run(1).unwrap();
+            }
+            c.run(2).unwrap();
+        }
+        let mut ok = false;
+        for _ in 0..800 {
+            c.run(1).unwrap();
+            if c.all_applied(last) {
+                ok = true;
+                break;
+            }
+        }
+        assert!(ok, "commits must continue after compaction");
+        c.check_invariants().unwrap();
+
+        // a restart resumes on the compacted base, not from index 1
+        c.crash(leader);
+        c.run(30).unwrap();
+        c.restart(leader).unwrap();
+        c.run(60).unwrap();
+        assert_eq!(c.node(leader).unwrap().snapshot_index(), base);
+        assert_eq!(c.node(leader).unwrap().first_index(), base + 1);
+        c.check_invariants().unwrap();
+        let applied: Vec<&[u8]> = c
+            .applied(leader)
+            .iter()
+            .map(|e| e.data.as_slice())
+            .filter(|d| !d.is_empty())
+            .collect();
+        assert_eq!(applied.len(), 30, "no applied entry may be lost");
+    }
+
+    /// A voter that falls behind the leader's snapshot cannot be repaired by the log: v1 has no
+    /// snapshot transfer, so the leader refuses to serve it and says so.
+    #[test]
+    fn a_voter_behind_the_snapshot_is_refused_not_silently_broken() {
+        let mut c = Cluster::new(3, 43, NetworkModel::default());
+        let leader = c.run_until_leader(300).unwrap().unwrap();
+        let mut last = 0;
+        for i in 1..=10u64 {
+            loop {
+                if let Some(idx) = c.propose(cmd(i)) {
+                    last = idx;
+                    break;
+                }
+                c.run(1).unwrap();
+            }
+            c.run(2).unwrap();
+        }
+        for _ in 0..800 {
+            c.run(1).unwrap();
+            if c.all_applied(last) {
+                break;
+            }
+        }
+        c.run(40).unwrap();
+        let leader = c.leader().unwrap_or(leader);
+        let base = {
+            let horizon = c.node(leader).unwrap().compaction_horizon();
+            c.node_mut(leader).unwrap().compact(horizon).unwrap()
+        };
+        assert!(base > 0);
+        // pretend a follower asked for an index the leader no longer has
+        let follower = (0..3).find(|i| *i != leader).unwrap();
+        let peer = c.members()[follower];
+        {
+            let r = c.node_mut(leader).unwrap();
+            let before = r.followers_behind_snapshot;
+            // the leader only sends on its heartbeat, so give it a few ticks; next_index stays
+            // where it was put because no reply is delivered in this loop
+            for _ in 0..20 {
+                r.force_next_index(peer, 1);
+                r.tick().unwrap();
+            }
+            assert!(
+                r.followers_behind_snapshot > before,
+                "the leader must report a follower it cannot serve"
+            );
+        }
+        c.check_invariants().unwrap();
     }
 
     #[test]

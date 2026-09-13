@@ -1,7 +1,9 @@
 # CarolinaDB — Implementation Status
 
-**Updated:** 2026-09-11
+**Updated:** 2026-09-13
 **Authoritative stage order:** [SPEC-014](../md/SPEC-014.md). This file records what exists in code and what evidence it has. It never upgrades a stage: `present in code != implemented capability != qualified capability != production-enabled capability`.
+**Requirement-level audit:** [AUDIT.md](AUDIT.md) classifies every requirement and acceptance row of SPEC-001…014 (and the owner checklists) as implemented / partial / missing against this tree (one auditor per target; the planned adversarial verification pass completed for one target only, which that file states up front); each `md/SPEC-0NN.md` header carries a one-paragraph `Implementation status (2026-09-12)` summary. An independent narrative audit written the same day is [Relatório de Auditoria Completa do CarolinaDB.md](Relat%C3%B3rio%20de%20Auditoria%20Completa%20do%20CarolinaDB.md).
+**Public CI:** the GitHub Actions run for commit `c98e984` (pushed 2026-09-12) **failed** at `cargo fmt --all -- --check` (formatting only), so clippy, the tests and the quick campaign did not run there. The tree has since been reformatted (`cargo fmt --all` clean) and verified locally (see "Test evidence"); a new push is needed before any public-CI claim.
 
 ## Legend
 
@@ -17,7 +19,7 @@
 | Item | Status |
 |---|---|
 | SPEC-009 v0.2 / SPEC-010 v0.2 / SPEC-011–014 present | ✅ (authored by the project owner) |
-| Cross-SPEC lint `tools/spec_lint.py` (aliases, schema owners, dangling refs/sections/links, naming residue, FM gates) | ✅ PASS, negative control verified |
+| Cross-SPEC lint `tools/spec_lint.py` (aliases, schema owners, dangling refs/sections/links, naming residue, FM gates) | ✅ PASS (16 files). `python tools/spec_lint.py --self-test` is the retained negative control: seven crafted bad documents, one per check, each of which must produce an error, plus a clean document that must not. CI runs both |
 | Ownership matrix `md/SPEC-OWNERSHIP.md` | ✅ |
 | Naming cleanup (`AstraDB`/`astra-*`/`astra <cmd>` → CarolinaDB/`carolina-*`/`carolina`; `astra.*` domains kept) | ✅ |
 | README status section | ✅ |
@@ -39,7 +41,10 @@
 | Bounded concurrent-acceptance counterexample explorer + replay | ✅ | `crates/carolina-lang/src/counterexample.rs` |
 | Seven SPEC-003 §12 fixtures + golden IR bytes/hashes | ✅ | `fixtures/dsl/*.cdl`, `fixtures/golden/*` |
 | S003-A01, A02, A03, A04, A06, A08, A10 | ✅ tests | `crates/carolina-lang/src/fixtures.rs` |
-| S003-A05 (aliasing/phantom/aggregate footprint tests), A07 (request identity), A09 (fuzz), A11 (session scope) | 🟡 A11 at lowering (nonempty session needs scope); A07 covered end-to-end by the runtime tests; A05/A09 pending |
+| S003-A05 (footprint traps), A07 (request identity), A09 (fuzz), A11 (session scope) | ✅ A05 covers aliasing (two point selectors in one atomic group, aliased call refused), phantom insertion (an insert inside every aggregate over the record, two admissible inserts violating the group budget together), aggregate group movement (a row changing its `GROUP BY` key is evaluated against the destination group), bound-source change (writing `Ledger[0].total` joins the closure of the constrained record), reference deletion (deleting the parent of a `REFERENCE` invariant is rejected and interacts with the child's writers) and unique absence (a key namespace, not a row); A11 at lowering and as `composite_session_scope_is_refused_as_unsupported`; A07 end-to-end in the runtime tests; A09 as a deterministic mutation fuzz over the IR decoder and the DSL frontend | `crates/carolina-compiler/tests/footprint_a05.rs`, `crates/carolina-lang/src/spec003_tests.rs` |
+| Grouped aggregate bounds (SPEC-003 §5): `AGGREGATE … GROUP BY m.team <= 10` now parses as key + bound. The group-key expression used to consume the comparison, so no grouped bound could be written at all; the key stops below the comparison level and a regression test pins the per-group semantics | ✅ fixed 2026-09-13 | `crates/carolina-lang/src/parser.rs`, test `grouped_aggregate_bound_parses_and_evaluates_per_group` |
+| Structural lowering errors (two/zero/optional primary keys, duplicate names, unresolved records), digest sensitivity (version/scale/invariant), byte-identical re-ordering under a preserved id allocation (A02), malformed-IR refusal, OPTIONAL/EXISTS reads, `Assign`/`AddToSet`/`RemoveFromSet`/`CompareAndSwap`, partial-release and same-endpoint-transfer rejections at the effect level | ✅ tests added 2026-09-12 | `crates/carolina-lang/src/spec003_tests.rs` |
+| Invariant expressions that fail (overflow inside an aggregate) reject without mutating the input; malformed invariant IR stays an internal error; `state_valid` re-checks disconnected invariants; return wrappers cannot hide rows/sets; keys and set elements need comparable nested types | ✅ | `crates/carolina-lang/tests/semantic_validation.rs` |
 | Q0 verdict | Q: PASS for the stated scope via `carolina qualify` (golden corpus, deterministic artifacts, reference evaluator with negative control); see "Qualification system" |
 
 Golden files under `fixtures/golden/` are the IR1 freeze candidates. They MAY be re-frozen with
@@ -56,7 +61,9 @@ Golden files under `fixtures/golden/` are the IR1 freeze candidates. They MAY be
 | Deterministic selection: C5 baseline, cheaper replacement only with proven obligations (C0 in local topology) | ✅ | `select.rs` |
 | Canonical `OperationPlan`, `ConsistencyCertificate`, artifact checker (`check_artifacts`), EXPLAIN | ✅ | `plan.rs`, `select.rs`, `explain.rs` |
 | Unsafe/incomplete scopes rejected (`UnsatisfiableDurability`, `UnsupportedSessionScope`, `UnmetObservationContract`, `NoSafePlan`) | ✅ tests | `crates/carolina-compiler/src/select.rs` |
-| CLI `carolina compile / explain / check / ir / fixtures` | ✅ | `crates/carolina-cli/src/main.rs` |
+| Artifact checker also verifies the evidence manifest: every `Disproven` judgment's counterexample bytes hash to the listed digest, no dangling entries (S004-A12: forged, dropped or dangling evidence fails) | ✅ | `select.rs` `check_artifacts`, test `checker_rejects_forged_or_missing_counterexample_evidence` |
+| Policy (`force_serial` keeps a closure on C5, policy hash in the certificate, no override of failed obligations), deterministic-budget exhaustion (`Unknown(BudgetExceeded)`, never Proven/Disproven, no evidence claimed), unqualified C3/C4 candidates (`MissingRuntimeCapability`), composite session scope (`UnsupportedSessionScope`) | ✅ tests added 2026-09-12 | `crates/carolina-compiler/src/lib.rs` |
+| CLI `carolina compile / explain / check / ir / fixtures`, plus `carolina plan <module> [operation]` (canonical `OperationPlan` artifacts) and `carolina graph invariants <module>` (IDC templates, affected records/invariants, interaction edges) | ✅ unit tests for plan/graph and compile→check round-trip with tampering | `crates/carolina-cli/src/main.rs` |
 | CC0 / CC1 (C5 portion) verdict | Q: PASS for the stated scope via `carolina qualify` Q0-DETERMINISM (18 plans, tampered artifacts refused); no distributed runtime qualification of any candidate |
 
 Candidates remain inactive until runtime qualification (SPEC-004 §13); the local runtime activates only
@@ -73,17 +80,23 @@ plans whose atomicity is one local batch and whose durability is `LocalStable`.
 | Redo-first journal, segments, group/sync/unsafe durability modes, torn-tail truncation only in the last segment, mid-log corruption fails closed | ✅ | `journal.rs`, `tests/kernel.rs` |
 | `CompiledBatch` / `ProtocolOnlyBatch` with semantic digest, one mutation per key, protocol record CAS (`ExpectedRecordRevision`), `TxnStatusRecord` phase machine | ✅ | `batch.rs` |
 | `DurableStorageKernel`: commit, commit_protocol, prepare/commit_prepared/abort_prepared (prepared state invisible, IN_DOUBT reported, decisions durable and idempotent), snapshots, checkpoint, recovery, verify | ✅ | `kernel.rs`, `tests/kernel.rs` |
+| SPEC-002 §69: a transaction that already has a durable decision (INSTALLED/TERMINAL/ABORTED) is never installed twice — a duplicate `commit` is refused with `TxnAlreadyCommitted`/`TxnAlreadyAborted` before anything is journaled (Store and MemKernel) | ✅ | `kernel.rs` `refuse_decided_txn`, `tests/kernel.rs` |
+| SPEC-002 §21/§78: key/value caps checked before the journal append (`KeyTooLarge`/`ValueTooLarge` leave no record to replay); one writer per directory enforced on every platform through `File::try_lock` (needs Rust ≥ 1.89) and released with the store | ✅ | `kernel.rs`, `tests/kernel.rs` |
+| Manifest page-size mismatch fails open; the buffer pool refuses to flush a dirty page whose LSN is not durable (WAL-before-page) | ✅ unit tests | `format.rs`, `tests/kernel.rs` |
+| SPEC-002 §111–§114 fail-closed durability: a durable write that returns early marks the store as requiring recovery (RAII guard), after which every read and every further commit through that handle is refused with `NotReady` until it is reopened; the acknowledged commit survives the reopen, work refused by the failed store never becomes visible, and the reopened store passes a full structural verify | ✅ campaign `io_error_never_yields_success` | `kernel.rs` (`begin_durable_write`), `campaign.rs`, `tests/crash_matrix.rs` |
 | Reference `MemKernel` and Store ⇄ MemKernel differential (user rows and txn statuses) | ✅ | `memkernel.rs`, `tests/kernel.rs` |
-| Crash campaign: every fault point × n-th occurrence, checking P1 (acked commits present), P2/P3 (crashed step all-or-nothing), P6 (recovery idempotent), P9 (prepared invisible/in doubt); injected I/O error never yields success | ✅ 52 crashing cases | `tests/crash_matrix.rs` |
+| Crash campaign: every fault point × n-th occurrence, checking P1 (acked commits present), P2/P3 (crashed step all-or-nothing), P6 (recovery idempotent), P9 (prepared invisible/in doubt); injected I/O error never yields success | ✅ 52 scheduled cases (13 fault points × nth 1..=4); in the standard profile 33 of them actually crash, the rest are unreachable or fall inside `create`, and the campaign asserts that at least two thirds of the reachable cases crashed | `tests/crash_matrix.rs` |
 | Local RequestHome: durable `request_home_state`, epoch advance per open, BindIfAbsent with CAS, identity conflict on changed content | ✅ | `crates/carolina-runtime/src/home.rs` |
-| Explicitly local `authority_grant` written at create and verified at open (no mocked distributed durability) | ✅ | `crates/carolina-runtime/src/engine.rs` |
+| Explicitly local `authority_grant` written at create and verified at open (no mocked distributed durability) | ✅ test `opening_without_a_matching_local_grant_is_refused`: a foreign home id, a foreign cluster id and a bare storage directory are each refused with `AuthorityUnavailable` before any request can bind | `crates/carolina-runtime/src/engine.rs`, `tests/local_slice.rs` |
 | Request path: admission (schema/operation/contract hashes, typed arguments) → bind → closure state load → interpreter → `CompiledBatch` (binding transition + terminal `TxnStatusRecord` + receipt) → reply | ✅ | `engine.rs` |
 | `FinalReceiptV1` persisted at the home, `ResolveRequest` → identical receipt, `OutcomeUnknown` on post-barrier failure, business rejections are final REJECTED receipts | ✅ | `engine.rs`, `tests/local_slice.rs` |
 | Result eviction → `ResultTombstoneV1`; namespace retirement → `IdentityExpired` | ✅ | `engine.rs` |
 | SPEC-014 §4 schedules: last unit contention, duplicate release, overflow, changed content under one key, crash after allocation, crash after commit before reply, result eviction, retired namespace after restart, checkpoint + reopen with identical receipts | ✅ | `crates/carolina-runtime/tests/local_slice.rs` |
-| CLI `carolina verify <dir>` and `carolina workload <dir>` | ✅ | `crates/carolina-cli/src/main.rs` |
+| Invariant scope: an operation whose closure has no invariants is not evaluated against unrelated aggregates over unloaded tables; an aggregate whose SUM overflows is a final `InvariantRejected` receipt (reason names `NumericOverflow`) with no row mutation, byte-identical on retry and resolvable after checkpoint + reopen | ✅ | `crates/carolina-runtime/tests/invariant_scope.rs` |
+| CLI `carolina verify <dir>` and `carolina workload <dir>` | ✅ smoke test `workload_then_verify_round_trip`: the workload writes a fresh directory and its retry returns byte-identical receipt bytes, resolve recovers the receipt, verify reopens and structurally checks the directory, and a directory holding no database fails | `crates/carolina-cli/src/main.rs`, `tests/qualification_cli.rs` |
 | Snapshots/restore (`SnapshotManifestV1`/chunks) wired into the store | 🟡 wire records and validation only (`crates/carolina-wire/src/snapshot.rs`); no store export/import yet |
-| Journal segment retention / MVCC garbage collection | ⬜ (versions and segments are retained; correctness-first) |
+| MVCC version reclamation and journal segment retention (SPEC-002 §87–§91, §105, S10) | ✅ at checkpoint, enabled by default (`StoreOptions::reclaim_at_checkpoint`). The horizon is the oldest registered snapshot and never above the durable read point; reclamation is page-local (a leaf drops only versions it can prove superseded inside itself) and tombstones are kept, because one key's versions may span leaves and a clean leaf is not rewritten. The journal keeps the segment holding `checkpoint_lsn` and everything after it, prepared transactions pin it through the existing clamp, and the manifest is published before any file is deleted. Metrics: `mvcc_versions_reclaimed_total`, `journal_segments_reclaimed_total`, `journal_bytes_reclaimed_total`, `journal_retained_bytes`, `oldest_snapshot_seq` | `kernel.rs`, `btree.rs` (`persist_with_gc`), `journal.rs`, tests `checkpoint_reclaims_invisible_versions_and_never_a_registered_snapshot`, `checkpoint_reclaims_journal_segments_but_prepared_work_pins_them` |
+| Checkpoint image completeness (defect found while enabling retention): a dirty page whose parent had been evicted was never written, because the copy-on-write walk descended only through resident pages. It was invisible while the journal was replayed from segment 1 and became data loss the moment the journal was truncated. The walk now fetches clean parents while any dirty page remains, and retention only advances when the checkpoint leaves the pool with no dirty page | ✅ | `btree.rs` `persist_page_gc`, `kernel.rs` |
 | Q1/Q2 verdicts | Q: PASS for the stated scope (see "Qualification system" below): `carolina qualify` gates Q0, Q1, Q2 PASS; fault model process kill / short write inside one process; OS page-cache loss is not modelled (SPEC-010 §7). |
 
 ## Qualification system (SPEC-010)
@@ -94,26 +107,42 @@ plans whose atomicity is one local batch and whose durability is `LocalStable`.
 | Statuses PASS/FAIL/INCONCLUSIVE/NOT_RUN/NOT_APPLICABLE, gate derivation (a NOT_APPLICABLE required check never opens a gate), claimed gates, exit codes 0/1/2/3 | ✅ | `verdict.rs` |
 | Observable history (§4): Invoke/AdmissionRefusal/FinalReply/UnknownReply/ExpiredReply/Decision/Crash/Restart/Checkpoint/Resolve/ResultEvicted/NamespaceRetired, canonical JSONL, trace digest | ✅ | `history.rs` |
 | Independent W1 oracle (§3/§4/§11): hand-written inventory model, no DSL interpreter import, exact result values | ✅ | `w1.rs` |
+| Usefulness measured separately from safety (SPEC-014 §4): `Q2-W1-LOCAL` counts committed invocations and FAILS a campaign that commits none, so refusing or rejecting everything can never satisfy the checker vacuously | ✅ | `runner.rs` |
 | History checker (§5): Q-C01, Q-C02, Q-C03, Q-C04, Q-C05, Q-C13, Q-C14 with branch exploration of unresolved unknowns and a budget (INCONCLUSIVE when exceeded); Q-C06–Q-C12 NOT_APPLICABLE with the disabled capability named | ✅ | `checker.rs` |
 | Deterministic local schedules over the runtime engine (§6/§7): seeded W1 workload with retries, changed content, eviction, retirement, restarts, checkpoints; crash at every `FaultPoint` × n-th occurrence; every request resolved after final recovery; engine state read back for the oracle | ✅ | `local.rs` |
 | Storage campaigns P1–P10 as callable functions shared by tests and the runner | ✅ | `crates/carolina-storage/src/campaign.rs` |
 | Minimizer (§15, delta debugging over the schedule, re-checked by the oracle) and bundles (`manifest.json`, `verdict.json`, `history.jsonl`, `schedule.json`, `metrics.json`, `reproduction.md`, `initial-state/`, `contracts/`, `plans/`, `evidence/`) | ✅ | `minimize.rs`, `bundle.rs` |
 | Campaign runner (§17) and CLI `carolina qualify / simulate / replay / minimize / report` | ✅ | `runner.rs`, `crates/carolina-cli/src/main.rs` |
 | Acceptance of the qualification system (§18): QA-01 (identical trace digest), QA-02 (negative controls: duplicated effect, ack before durable, erased earlier reservation = QA-08, unknown treated as abort), QA-03, QA-04 (budget → INCONCLUSIVE), QA-05 (omitted scenario → NOT_RUN, non-zero exit), QA-07 (unsafe no-fsync refused), QA-10 (test root allowlist) | ✅ | `crates/carolina-qualify/tests/acceptance.rs` |
+| Campaign configuration validation: empty seed sets and zero exercise budgets are refused (`ConfigError::InvalidBudget`) before any I/O; the CLI refuses malformed `qualify` options with exit code 2; `replay`/`minimize` never report INCONCLUSIVE as success; a retained bundle cannot lose its trace binding or mix evidence from two runs | ✅ | `tests/acceptance.rs`, `tests/bundle_integrity.rs`, `crates/carolina-cli/tests/qualification_cli.rs` |
 | Formal models FM-1/FM-2/FM-3 (§16): explicit-state BFS checkers with exhaustive exploration under stated bounds and mandatory negative controls (each broken variant produces a counterexample trace); TLA+ sources + `.cfg` for TLC in `models/` | ✅ PASS within bounds (FM-1: 3268 states, 5 controls; FM-2: 486 states, 6 controls; FM-3: 3392 states, 5 controls). TLC has **not** been run (no toolchain recorded). Bounded model evidence only: the protocols are not implemented, so Q3–Q6 stay NOT_RUN | `crates/carolina-models/src/{fm1,fm2,fm3}.rs`, `models/` |
-| Codec golden corpus (SPEC-012 §12, SPEC-014 §5): `fixtures/codec/` freezes 52 canonical vectors (23 registered record kinds plus node log/admin payloads and consensus envelopes) with digests in `manifest.txt`; every vector must be a decode/encode fixed point and 208 derived negative vectors (unknown field, truncation, number literal, whitespace) must be refused | ✅ `QI-CODEC-CORPUS` PASS; re-freeze only with `UPDATE_GOLDEN=1 cargo test -p carolina-qualify codec` | `crates/carolina-qualify/src/codec_corpus.rs`, `fixtures/codec/` |
+| Codec golden corpus (SPEC-012 §12, SPEC-014 §5): `fixtures/codec/` freezes 54 canonical vectors (25 registered record kinds plus node log/admin payloads and consensus envelopes) with digests in `manifest.txt`; every vector must be a decode/encode fixed point and the derived negative vectors (unknown field, truncation, number literal, whitespace) must be refused | ✅ `QI-CODEC-CORPUS` PASS; `snapshot_manifest`/`snapshot_chunk` were frozen on 2026-09-12 (their codecs exist; the store-level export/import does not); re-freeze only with `UPDATE_GOLDEN=1 cargo test -p carolina-qualify codec` | `crates/carolina-qualify/src/codec_corpus.rs`, `fixtures/codec/` |
 | QI security (SPEC-013) | ⬜ NOT_RUN — mTLS/authorization not implemented |
 
-Latest `carolina qualify --quick` (2026-09-11, debug build, this tree): gates **Q0 PASS, Q1 PASS, Q2 PASS,
-FM PASS, Q3-C5 PASS** (claimed), QI/Q3–Q7 NOT_RUN (not claimed). The Q3-C5 scope: consensus simulation
-(seed set, 20 proposals, loss/dup/delay, crash+restart of every voter, isolated leader, replay
-determinism) and the three-process campaign (leader kill, restart + replay, majority kill). Scope of the PASS: Q0 = 7 golden fixtures, 18 plans
-deterministic, 7 tampered plans refused, last-unit race found/replayed with a quiet negative control;
-Q1 = 9000 B+Tree ops with reference scans, crash matrix 13 fault points × nth 1..=2 (19 crashing cases),
-torn tail / mid-log corruption / injected I/O error; Q2 = prepared invisibility, epoch change, 300-batch
-kernel differential, 14 W1 schedules (seed 1, 16 ops, 13 fault points) against the independent oracle
-with identical trace digests on replay. `cargo run -p carolina-cli -- qualify --out qualification`
-runs the standard budgets and writes the bundle.
+Latest campaigns (debug build, this tree, 2026-09-12): `carolina qualify --quick` and the **standard**
+budgets (`carolina qualify --out qualification`) both end with gates **Q0 PASS, Q1 PASS, Q2 PASS,
+FM PASS, Q3-C5 PASS** (claimed, exit code 0); QI, Q3, Q4, Q5, Q6, Q7 NOT_RUN (not claimed; QI because
+`QI-SECURITY` is NOT_RUN — `QI-CATALOG` and `QI-CODEC-CORPUS` PASS). Scope of the standard PASS:
+Q0 = 7 golden fixtures, 18 plans deterministic, 7 tampered plans refused, last-unit race found and
+replayed with a quiet negative control, 44 compiler counterexamples canonical; Q1 = 18000 B+Tree ops
+with 388 splits against reference scans (seeds 1..3, pools 16/64/128, hot key with 3000 versions),
+crash matrix 13 fault points × nth 1..=4 (33 crashing cases of 52 scheduled, P1/P2/P3/P6/P9 held),
+torn tail / mid-log corruption / injected I/O error, 6 checkpoint-stage crashes; Q2 = prepared
+invisibility, epoch change, 300-batch kernel differential, stale plan/schema admission, 160 W1
+schedules (seeds 1–4, 40 ops each, 13 fault points × nth 1..=3, checker budget 200000) against the
+independent oracle with every receipt resolved identically after recovery, and an identical trace
+digest on replay of a crashing schedule; FM-1 3268 states / FM-2 486 states / FM-3 3392 states with
+every negative control producing a counterexample; Q3-C5 = consensus simulation (4 seeds, 20 proposals
+each, 1066 delivered / 197 dropped / 55 duplicated messages, crash+restart of every voter, isolated
+leader, replay determinism) and the three-process campaign (bootstrap through the log, C5-001/009/010/021,
+leader kill, restart + replay, majority kill). The quick profile is what CI runs and uses smaller budgets: seeds 1–2, 24 ops per schedule,
+crash matrix nth 1..=2, 3000 B+Tree ops per seed. It was re-run on this tree on 2026-09-13, after version reclamation and journal retention were
+enabled, and still ends `overall PASS` with exit code 0: 54 W1 schedules in which 780 of 1485
+invocations committed (the campaign now fails a run that commits none, SPEC-014 §4), the crash
+matrix crashing in 19 of 26 scheduled cases with P1/P2/P3/P6/P9 held, 54 frozen codec vectors over
+25 registered kinds with 216 negative vectors refused, and the same gate set as above. The
+standard-profile figures in this paragraph were measured on 2026-09-12; reclamation does not change
+those counters, but the standard profile has not been re-run since.
 
 ## MVP-3 — Catalog and single-IDC C5 (SPEC-008 §5/§8, SPEC-011, SPEC-012 §3/§9–§10, SPEC-013)
 
@@ -123,11 +152,13 @@ runs the standard budgets and writes the bundle.
 | Deterministic cluster simulator (SPEC-010 §6): seeded scheduler, loss/duplication/delay, directional partitions, crash/restart from modeled durable state; invariants election safety, log matching, state-machine safety, leader completeness checked after every delivery; reproducible traces | ✅ | `crates/carolina-consensus/src/sim.rs` |
 | Catalog state machine (SPEC-011 §3–§5, §7–§8): typed `CatalogKey`s, `CatalogCommand` CAS with expected revisions + digests, phantom-safe scope-lock overlap predicate, one `CatalogGeneration` per successful command, idempotent `AdminRequestId` results, `IdentityConflict` on reuse with different bytes, genesis over a pinned bootstrap manifest (hash verified by every voter, second genesis refused, exactly three voters), grant lifecycle `STAGED→ACTIVE→CLOSING→CLOSED→RETIRED` (closed never reopens), request routes, tombstones that refuse re-insertion | ✅ | `crates/carolina-catalog/src/lib.rs` |
 | Node process: `ASTR`/TCP transport with Hello/HelloAck negotiation, role-bound frame kinds (`Consensus` only from `Node` peers, `Admin` only from admin endpoints), peer links with reconnection, single-threaded core | ✅ | `crates/carolina-node/src/{transport,core}.rs`, binary `carolina-node` |
+| `DEV_LOCAL` hardening: listeners, peers and clients refuse any non-loopback address; `NodeConfig::validate` rejects wrong profiles, a voter set that is not exactly three distinct voters, a node that is not a named voter, zero ticks, missing/duplicate/unknown/self peers, non-loopback or zero-port or reused addresses, before any listener, thread or data directory is created | ✅ | `transport.rs`, `config.rs`, `tests/config_validation.rs` |
+| Admission rechecked in log order: an `Admit` entry whose route/grant/catalog generation no longer authorizes it at its log position is refused with `AuthorityUnavailable` on every voter (a catalog transition can revoke an admission the leader already queued); an admin request id bound to different command bytes is answered with `IdentityConflict` instead of the other command's result | ✅ in-process tests (three `NodeCore`s over channels): concurrent changed content refused / exact retries share one decision, leadership loss keeps the request hash in the unknown reply, a restarted successor finishes an inherited admission before resolve publishes | `core.rs`, `core_tests.rs` |
 | Single-IDC C5 ordered execution (SPEC-008 §8): leader admits an `Invoke` as an ordered `Admit` entry; every voter executes the same deterministic engine step in log order; the leader proposes the unique `Decision` (receipt digest); the client reply waits for that decision's commit; followers verify their own digest and fail closed on divergence; `ResolveRequest` served by the leader only after a read barrier; a follower/minority refuses mutations | ✅ | `crates/carolina-node/src/core.rs` |
 | Replicated RequestHome: pinned home epoch, allocation counter written in the same protocol batch as each binding, so a new leader continues the same `TxnId` sequence | ✅ | `crates/carolina-runtime/src/home.rs` (`open_pinned`) |
 | Bootstrap through the log: genesis → home grant STAGED → ACTIVE → request route (idempotent admin ids; a new leader resumes) | ✅ | `core.rs` `leader_duties` |
 | Real-process campaign (SPEC-010 §9 subset): three `carolina-node` processes, isolated data directories, loopback; C5-001/009/010/021 and replicated determinism after killing the leader, restarting it and killing a majority | ✅ | `crates/carolina-node/src/campaign.rs`, `tests/three_nodes.rs` |
-| SPEC-013 mTLS / authorization / credential records | ⬜ **not implemented** — only the `DEV_LOCAL` plaintext profile exists and the node never advertises `ENCRYPTED_HOST_V1`; no security qualification is claimed |
+| SPEC-013 mTLS / authorization / credential records | ⬜ **not implemented** — only the `DEV_LOCAL` plaintext, loopback-only profile exists and the node never advertises `ENCRYPTED_HOST_V1`; no security qualification is claimed. Consequently the SPEC-014 §3 exit criteria of MVP-3 ("SPEC-013 mTLS/authorization … applicable QI") are **not met** even though Q3-C5 passes |
 | Log compaction / catalog snapshots (SPEC-011 §9), dynamic membership | ⬜ (the log is replayed from index 1 at restart; membership is fixed) |
 | QI verdict | Q: `QI-CATALOG` PASS (CAT-01/02/05/12/15/16 + closed-never-reopens); `QI-CODEC-CORPUS` PASS (52 vectors / 23 kinds; kinds of disabled features are listed as not frozen); `QI-SECURITY` NOT_RUN → gate QI NOT_RUN |
 | Q3 verdict | Q: gate **`Q3-C5` PASS** for the single-IDC C5 slice (`Q3-CONSENSUS-SIM` + `Q3-C5-PROCESS` + `QI-CATALOG` + FM-2 model within bounds); gate Q3 (C1/C2/C3 slices) NOT_RUN |
@@ -140,21 +171,20 @@ adapter or real-process campaign exists for them.
 
 ## Test evidence (this tree)
 
-`cargo test --workspace` on 2026-09-11: core 25, lang 19, compiler 10, wire 7, storage 17
-(3 format + 4 B+Tree differential + 3 crash matrix/epoch + 7 kernel), runtime 10 (1 unit + 9 end-to-end),
-qualify 11 (4 unit incl. the codec corpus + 7 acceptance incl. one quick campaign), models 4 (three positive models with
-negative controls), consensus 8, catalog 3, node 1 (three real processes);
-`cargo clippy --workspace --all-targets` clean; `cargo fmt --all -- --check` clean;
-`tools/spec_lint.py` PASS.
+`cargo test --workspace` on 2026-09-13 (rustc 1.96.0, Windows 11): 174 tests, all passing — core 25, lang 32 (27 unit + 5 semantic validation), compiler 22 (16 unit + 6 footprint A05), wire 7, storage 22 (3 unit + 4 B+Tree differential + 3 crash matrix/epoch + 12 kernel), runtime 12 (1 unit + 1 invariant scope + 10 end-to-end), qualify 17 (4 unit incl. the codec corpus + 8 acceptance incl. one quick campaign + 5 bundle integrity), models 4, consensus 8, catalog 3, node 16 (8 unit incl. a three-node in-process cluster + 7 configuration + 1 three real processes), cli 6 (2 unit + 4 CLI); 0 failed, 0 ignored.
+`cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean;
+`tools/spec_lint.py` PASS (16 files). The three-process campaign and the qualification acceptance
+suite run real processes and real fsync and take about two minutes together.
 
 ## Release artifacts
 
 | Item | Status |
 |---|---|
 | `LICENSE` (Apache-2.0, as declared in `Cargo.toml`; owner to confirm) | ✅ file present |
-| `.github/workflows/ci.yml` (spec lint, fmt, clippy `-D warnings`, tests, quick qualification campaign with uploaded bundle; Linux + Windows) | ✅ not yet executed on a CI service |
+| `.github/workflows/ci.yml` (spec lint, fmt, clippy `-D warnings`, tests, quick qualification campaign with uploaded bundle; Linux + Windows) | 🟡 file present; the public run for commit `c98e984` **failed at `cargo fmt --check`** on both runners (formatting only, later steps skipped). Reformatted in this tree; rerun pending |
 | `SECURITY.md` | ✅ |
-| SBOM, signed releases, `docs/build` | ⬜ |
+| `docs/BUILD.md` (build, test, qualification campaign, three-node cluster, troubleshooting) | ✅ |
+| SBOM, signed releases, reproducible-build configuration, release manifest | ⬜ |
 
 ## Known deviations and decisions
 
@@ -179,3 +209,8 @@ negative controls), consensus 8, catalog 3, node 1 (three real processes);
 - Voters replay the whole log at restart (no compaction); engine steps are idempotent by request binding, so replay never re-executes a decided request.
 - Typed decoding is strict by construction: `Canonical::decode` re-projects the decoded value to canonical form and requires equality with the input, so unknown fields and lossy projections are refused by every decoder (found by the codec corpus: `ResolveReplyV1` had accepted unknown fields).
 - Registered record kinds whose features are disabled (snapshots, C1/C2/C3/C4, evolution, session tokens) have no codec and are reported as not frozen; enabling such a feature requires freezing its vectors first (SPEC-014 §5).
+- `Cargo.toml` declares `rust-version = "1.89"`: the portable one-writer lock uses `std::fs::File::try_lock`, stable since Rust 1.89.
+- A duplicate `commit` of a transaction that already has a durable decision is a typed refusal (SPEC-002 §69), not a second install; the runtime never issues one (retries resolve by `RequestKey`), the guard exists so the kernel boundary holds on its own.
+- Key/value caps are enforced at admission, before the journal append, so a refused batch leaves nothing for recovery to replay.
+- `CandidateRejection.operation_name` is rendered as `name@version`.
+- The `DEV_LOCAL` transport refuses non-loopback addresses on both ends; it remains an unauthenticated test profile (SECURITY.md).

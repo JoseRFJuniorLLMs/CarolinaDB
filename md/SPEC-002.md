@@ -2,6 +2,7 @@
 
 **Subtitle:** Page Store, MVCC, Commit Journal, Atomic Batches and Crash Recovery
 **Status:** Draft 0.2 — proposed boundary; formats and runtime qualification pending
+**Implementation status (2026-09-12):** Durable core implemented and crash-tested in `crates/carolina-storage`: formats (§§12–22), journal (§§45–58), B+Tree/MVCC (§§31–35, §§72–77), CompiledBatch/protocol CAS (§§37–44, §69 duplicate-commit refusal), prepared decisions (§§59–65), checkpoint/recovery (§§80–86), verify (§127), campaigns P1–P4/P6–P10, one-writer lock (§78, all platforms). Missing: latching/concurrency (§27, S9), group commit (§55), MVCC/journal GC and retention horizons (§§87–91, §105, S10), journal consumers and OriginId dedupe (§§100–105), storage transaction object (§36/§124, P5), ExpectedVersion CAS (§39), read-set capture (§40), diagnostics commands/metrics/tracing (§§128–131), fuzz harness, storage models, benchmarks (S12). Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Type:** Foundational implementation specification
 **Depends on:** `SPEC-001 — Invariant-Compiled Consistency`
 **Shared contracts:** [SPEC-011](SPEC-011.md) identities/catalog; [SPEC-012](SPEC-012.md) request/receipt/encoding; [SPEC-013](SPEC-013.md) trust profiles

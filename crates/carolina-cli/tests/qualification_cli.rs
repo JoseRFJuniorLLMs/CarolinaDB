@@ -15,7 +15,9 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "carolina-qualify-cli-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+            "carolina-qualify-cli-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&path).unwrap();
         Self(path)
@@ -48,7 +50,12 @@ fn qualification_rejects_malformed_options_and_empty_budgets() {
         vec!["--skip"],
     ] {
         let output = command().arg("qualify").args(&args).output().unwrap();
-        assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
@@ -71,11 +78,23 @@ fn bundle(root: &Path, budget: usize) -> PathBuf {
         metrics: BTreeMap::new(),
         claimed_gates: vec![],
     };
-    write_bundle(root, &BundleInput {
-        manifest: &manifest, verdict: &verdict, history: Some(&history), schedule: Some(&schedule),
-        initial: None, final_state: None, contracts: vec![], plans: vec![], evidence: vec![],
-        metrics: &verdict.metrics, reproduction: String::new(),
-    }).unwrap()
+    write_bundle(
+        root,
+        &BundleInput {
+            manifest: &manifest,
+            verdict: &verdict,
+            history: Some(&history),
+            schedule: Some(&schedule),
+            initial: None,
+            final_state: None,
+            contracts: vec![],
+            plans: vec![],
+            evidence: vec![],
+            metrics: &verdict.metrics,
+            reproduction: String::new(),
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -83,10 +102,21 @@ fn replay_and_minimize_do_not_report_inconclusive_as_success() {
     let tr = Scratch::new();
     let dir = bundle(&tr.0, 1);
     for subcommand in ["replay", "minimize"] {
-        let output = command().arg(subcommand).arg("--bundle").arg(&dir)
-            .arg("--test-root").arg(&tr.0).output().unwrap();
-        assert_eq!(output.status.code(), Some(3), "{subcommand}: {} {}",
-            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let output = command()
+            .arg(subcommand)
+            .arg("--bundle")
+            .arg(&dir)
+            .arg("--test-root")
+            .arg(&tr.0)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "{subcommand}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
@@ -102,14 +132,97 @@ fn bundles_verify_manifest_and_history_binding_and_replay_determinism() {
     std::fs::write(dir.join("manifest.json"), original.manifest.encode()).unwrap();
     std::fs::write(dir.join("history.jsonl"), "").unwrap();
     assert!(load_bundle(&dir).err().unwrap().contains("trace digest"));
-    std::fs::write(dir.join("history.jsonl"), original.history.unwrap().to_jsonl()).unwrap();
+    std::fs::write(
+        dir.join("history.jsonl"),
+        original.history.unwrap().to_jsonl(),
+    )
+    .unwrap();
 
-    let pass = command().arg("replay").arg("--bundle").arg(&dir)
-        .arg("--test-root").arg(&tr.0).output().unwrap();
-    assert!(pass.status.success(), "{} {}", String::from_utf8_lossy(&pass.stdout), String::from_utf8_lossy(&pass.stderr));
+    let pass = command()
+        .arg("replay")
+        .arg("--bundle")
+        .arg(&dir)
+        .arg("--test-root")
+        .arg(&tr.0)
+        .output()
+        .unwrap();
+    assert!(
+        pass.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&pass.stdout),
+        String::from_utf8_lossy(&pass.stderr)
+    );
     // A different valid schedule still passes the oracle, but cannot reproduce the retained trace.
-    std::fs::write(dir.join("schedule.json"), generate_schedule(9, 8, None).encode()).unwrap();
-    let changed = command().arg("replay").arg("--bundle").arg(&dir)
-        .arg("--test-root").arg(&tr.0).output().unwrap();
-    assert_eq!(changed.status.code(), Some(1), "{}", String::from_utf8_lossy(&changed.stdout));
+    std::fs::write(
+        dir.join("schedule.json"),
+        generate_schedule(9, 8, None).encode(),
+    )
+    .unwrap();
+    let changed = command()
+        .arg("replay")
+        .arg("--bundle")
+        .arg(&dir)
+        .arg("--test-root")
+        .arg(&tr.0)
+        .output()
+        .unwrap();
+    assert_eq!(
+        changed.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&changed.stdout)
+    );
+}
+
+/// The two local-slice commands are exercised end to end: `carolina workload <dir>` runs the
+/// SPEC-014 §4 reserve/release schedule against a fresh data directory (identical receipt bytes on
+/// retry, resolve after a lost reply), and `carolina verify <dir>` reopens that directory, recovers
+/// it and verifies its structure. A directory that was never created is not silently "verified".
+#[test]
+fn workload_then_verify_round_trip() {
+    let scratch = Scratch::new();
+    let dir = scratch.0.join("data-demo");
+    let out = command().arg("workload").arg(&dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "workload failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    for expected in [
+        "identical receipt bytes",
+        "resolve(reserve-1)",
+        "duplicate release",
+        "checkpoint lsn=",
+    ] {
+        assert!(
+            text.contains(expected),
+            "workload output missing {expected}: {text}"
+        );
+    }
+    let retry_line = text
+        .lines()
+        .find(|l| l.starts_with("identical receipt bytes"))
+        .expect("retry comparison line");
+    assert!(
+        retry_line.contains("true"),
+        "the retry must return byte-identical receipt bytes: {retry_line}"
+    );
+
+    let out = command().arg("verify").arg(&dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "verify failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("readiness: Ready"), "{text}");
+    assert!(text.contains("pages:"), "{text}");
+
+    let missing = scratch.0.join("never-created");
+    let out = command().arg("verify").arg(&missing).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "verify must not succeed on a directory that holds no database"
+    );
 }

@@ -761,15 +761,52 @@ impl BTree {
 
     /// Copy-on-write persistence of every dirty page reachable from the root. Returns the new root id.
     pub fn persist(&mut self, ctx: &mut TreeCtx) -> CoreResult<u64> {
-        let new_root = self.persist_page(ctx, self.root)?;
-        self.root = new_root;
-        Ok(new_root)
+        self.persist_with_gc(ctx, None).map(|(root, _)| root)
     }
 
-    fn persist_page(&mut self, ctx: &mut TreeCtx, pid: u64) -> CoreResult<u64> {
+    /// Persist and, when `gc_horizon` is `Some(h)`, reclaim MVCC versions that no reader can ever
+    /// observe again (SPEC-002 §87–§91).
+    ///
+    /// `h` is the oldest sequence any registered snapshot (or the current read point) may still
+    /// read. For each key a rewritten leaf keeps every version above `h` plus the single newest
+    /// version at or below `h` — the one a reader at `h` would see — and drops the rest. A
+    /// tombstone that is the only survivor at or below `h` is dropped as well: nothing older
+    /// remains, so the key cannot be resurrected by removing it (§91 anti-resurrection).
+    ///
+    /// Reclamation is opportunistic: it only touches pages this checkpoint already rewrites, so a
+    /// clean page keeps its history until it is next written. Overflow pages of reclaimed versions
+    /// are not returned to the file (there is no free list in v1). Returns `(root, versions
+    /// reclaimed)`.
+    pub fn persist_with_gc(
+        &mut self,
+        ctx: &mut TreeCtx,
+        gc_horizon: Option<u64>,
+    ) -> CoreResult<(u64, u64)> {
+        let mut reclaimed = 0u64;
+        let new_root = self.persist_page_gc(ctx, self.root, gc_horizon, &mut reclaimed)?;
+        self.root = new_root;
+        Ok((new_root, reclaimed))
+    }
+
+    fn persist_page_gc(
+        &mut self,
+        ctx: &mut TreeCtx,
+        pid: u64,
+        gc_horizon: Option<u64>,
+        reclaimed: &mut u64,
+    ) -> CoreResult<u64> {
         let lsn = ctx.current_lsn;
         if !ctx.pool.contains(pid) {
-            return Ok(pid); // clean, on disk
+            // A clean parent may still hide a dirty descendant: a page can be evicted while pages
+            // below it stay dirty in the pool, and a dirty page is never evicted. Descending only
+            // through resident pages would leave those writes out of the persisted image, which is
+            // invisible while the journal is kept from the beginning and fatal once it is
+            // truncated (SPEC-002 §105). Fetch the page and keep descending while any dirty page
+            // remains; when none is left the rest of the tree is already on disk.
+            if ctx.pool.dirty_count() == 0 {
+                return Ok(pid);
+            }
+            Self::fetch(ctx, pid)?;
         }
         let (ptype, mut dirty, records) = {
             let (fi, pool) = Self::fetch(ctx, pid)?;
@@ -781,7 +818,7 @@ impl BTree {
             let mut new_records = Vec::with_capacity(records.len());
             for r in &records {
                 let e = InternalEntry::decode(r)?;
-                let new_child = self.persist_page(ctx, e.child)?;
+                let new_child = self.persist_page_gc(ctx, e.child, gc_horizon, reclaimed)?;
                 if new_child != e.child {
                     changed = true;
                     new_records.push(
@@ -842,6 +879,31 @@ impl BTree {
                     }
                 }
             }
+            // Version reclamation runs after the chains above are flushed, so a dropped entry
+            // never leaves an unwritten dirty overflow page behind.
+            if let Some(h) = gc_horizon {
+                let (kept, dropped) = Self::compact_versions(&records, h)?;
+                if dropped > 0 && !kept.is_empty() {
+                    let (fi, pool) = Self::fetch(ctx, pid)?;
+                    let frame = pool.frame_mut(fi);
+                    let pg = &mut frame.bytes[..];
+                    let mut header = PageHeader::read(pg, pid)?;
+                    header.page_lsn = lsn;
+                    if write_records(pg, &mut header, &kept) {
+                        pool.mark_dirty(fi, lsn);
+                        dirty = true;
+                        *reclaimed += dropped;
+                    } else {
+                        // the compacted image did not fit (cannot happen: it is a subset) — keep
+                        // the page as it was rather than risk a partial rewrite
+                        let (fi, pool) = Self::fetch(ctx, pid)?;
+                        let frame = pool.frame_mut(fi);
+                        let pg = &mut frame.bytes[..];
+                        let mut header = PageHeader::read(pg, pid)?;
+                        write_records(pg, &mut header, &records);
+                    }
+                }
+            }
         }
         if !dirty {
             return Ok(pid);
@@ -860,6 +922,49 @@ impl BTree {
         // re-key the frame under the new id, clean
         ctx.pool.rekey(pid, new_id, bytes);
         Ok(new_id)
+    }
+
+    /// Page-local version reclamation. Entries arrive ordered `(key ASC, seq DESC)`, so within one page
+    /// the first entry of a key group is its newest version.
+    ///
+    /// Per key this keeps every version above `horizon` plus the newest version at or below it, and
+    /// drops the remaining ones — each of those is strictly older than a version of the same key that
+    /// survives in this same page and is itself at or below the horizon, so no reader at or above the
+    /// horizon can ever select it again. The rule is deliberately page-local: one key's versions may
+    /// span several leaves and a clean leaf is not rewritten, so a page cannot conclude anything about
+    /// versions it does not hold. For the same reason tombstones are never dropped here — removing one
+    /// could expose an older version living in another leaf (§91 anti-resurrection); reclaiming dead
+    /// tombstones needs a whole-key sweep, which v1 does not do.
+    ///
+    /// Returns the kept records and how many were dropped.
+    fn compact_versions(records: &[Vec<u8>], horizon: u64) -> CoreResult<(Vec<Vec<u8>>, u64)> {
+        let mut decoded: Vec<(Vec<u8>, u64)> = Vec::with_capacity(records.len());
+        for r in records {
+            let e = LeafEntry::decode(r)?;
+            decoded.push((e.key.to_vec(), e.seq));
+        }
+        let mut kept: Vec<Vec<u8>> = Vec::with_capacity(records.len());
+        let mut dropped = 0u64;
+        let mut i = 0usize;
+        while i < decoded.len() {
+            let mut j = i;
+            while j < decoded.len() && decoded[j].0 == decoded[i].0 {
+                j += 1;
+            }
+            let mut kept_at_or_below = false;
+            for (k, (_, seq)) in decoded.iter().enumerate().take(j).skip(i) {
+                if *seq > horizon {
+                    kept.push(records[k].clone());
+                } else if !kept_at_or_below {
+                    kept_at_or_below = true;
+                    kept.push(records[k].clone());
+                } else {
+                    dropped += 1;
+                }
+            }
+            i = j;
+        }
+        Ok((kept, dropped))
     }
 
     /// Structural verification (SPEC-002 §127): checksums, types, ordering, separators, reachability.

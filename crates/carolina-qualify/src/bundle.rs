@@ -6,9 +6,11 @@
 //!   initial-state/  contracts/  plans/  evidence/
 //! ```
 //! Bundles contain only synthetic data. A bundle is written for every FAIL/INCONCLUSIVE run and,
-//! when requested, for passing runs as retained evidence.
+//! when requested, for passing runs as retained evidence. Repeated run identities receive a
+//! fresh directory suffix; an existing bundle is never overwritten or reused.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use carolina_core::canon::{CanonValue, Canonical};
@@ -66,15 +68,99 @@ fn model_canon(m: &InventoryModel) -> CanonValue {
         .build()
 }
 
+fn file_component(name: &str) -> std::io::Result<()> {
+    if name.is_empty()
+        || matches!(name, "." | "..")
+        || name.contains(['/', '\\', ':', '\0'])
+        || name.ends_with(['.', ' '])
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid bundle component {name:?}"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_input(input: &BundleInput<'_>) -> std::io::Result<()> {
+    file_component(&input.verdict.campaign_id)?;
+    file_component(&input.verdict.run_id)?;
+    if input.manifest.manifest_hash() != input.verdict.manifest_hash {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "verdict manifest hash mismatch",
+        ));
+    }
+    if input.schedule.is_some() && input.history.is_none() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "schedule.json requires history.jsonl",
+        ));
+    }
+    if let Some(history) = input.history {
+        if history.trace_digest() != input.verdict.trace_digest {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "verdict trace digest mismatch",
+            ));
+        }
+    }
+    for (artifacts, reserved) in [
+        (&input.contracts, None),
+        (&input.plans, None),
+        (
+            &input.evidence,
+            input.final_state.map(|_| "final-state.json"),
+        ),
+    ] {
+        let mut names = BTreeSet::new();
+        if let Some(name) = reserved {
+            names.insert(name.to_string());
+        }
+        for (name, _) in artifacts {
+            file_component(name)?;
+            // Portable bundles must not alias files on case-insensitive filesystems either.
+            if !names.insert(name.to_lowercase()) {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("duplicate bundle artifact {name}"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reserve_directory(out: &Path, campaign_id: &str, run_id: &str) -> std::io::Result<PathBuf> {
+    let campaign = out.join(campaign_id);
+    std::fs::create_dir_all(&campaign)?;
+    for occurrence in 1u64.. {
+        let name = if occurrence == 1 {
+            run_id.to_string()
+        } else {
+            format!("{run_id}-{occurrence}")
+        };
+        let dir = campaign.join(name);
+        // create_dir reserves a new directory atomically, including when other writers race.
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(Error::new(
+        ErrorKind::AlreadyExists,
+        "bundle directory names exhausted",
+    ))
+}
+
 pub fn write_bundle(out: &Path, input: &BundleInput<'_>) -> std::io::Result<PathBuf> {
-    let dir = out
-        .join(&input.verdict.campaign_id)
-        .join(&input.verdict.run_id);
+    validate_input(input)?;
+    let dir = reserve_directory(out, &input.verdict.campaign_id, &input.verdict.run_id)?;
     for sub in ["initial-state", "contracts", "plans", "evidence"] {
         std::fs::create_dir_all(dir.join(sub))?;
     }
     std::fs::write(dir.join("manifest.json"), input.manifest.encode())?;
-    std::fs::write(dir.join("verdict.json"), input.verdict.encode())?;
     if let Some(h) = input.history {
         std::fs::write(dir.join("history.jsonl"), h.to_jsonl())?;
     }
@@ -115,6 +201,9 @@ pub fn write_bundle(out: &Path, input: &BundleInput<'_>) -> std::io::Result<Path
         CanonValue::Object(metrics).encode(),
     )?;
     std::fs::write(dir.join("reproduction.md"), &input.reproduction)?;
+    // Publish the verdict only after all of this run's evidence has been written. A failed
+    // write leaves an incomplete fresh directory, without damaging any previous evidence.
+    std::fs::write(dir.join("verdict.json"), input.verdict.encode())?;
     Ok(dir)
 }
 
@@ -151,6 +240,9 @@ pub fn load_bundle(dir: &Path) -> Result<LoadedBundle, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("history.jsonl: {e}")),
     };
+    if schedule.is_some() && history.is_none() {
+        return Err("history.jsonl: required for a bundle containing schedule.json".into());
+    }
     if let Some(h) = &history {
         if h.trace_digest() != verdict.trace_digest {
             return Err("history.jsonl: trace digest does not match verdict.json".into());

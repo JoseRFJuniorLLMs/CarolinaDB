@@ -1,6 +1,7 @@
 # SPEC-012 — Request Identity, Client Protocol, Wire Encoding & Compatibility
 
-**Status:** Draft 0.1 — normative design; codecs, full golden corpus and interoperability are not implemented or qualified
+**Status:** Draft 0.1 — normative design; the codecs of the enabled record kinds are implemented and frozen, the corpus of disabled kinds and independent interoperability are not (see the implementation status below)
+**Implementation status (2026-09-12):** Local/single-IDC slice implemented and tested: RequestKey/RequestHash with server recomputation, RequestHome BindIfAbsent and the TxnId layout (§3), all ClientReplyV1 outcomes and ResolveRequest (§§4–5), result eviction and namespace retirement, byte-identical FinalReceiptV1 (§7), strict canonical encoding with re-encode comparison (§8), ASTR envelope and Hello/HelloAck downgrade protection (§§9–10), 52-vector frozen codec corpus with 208 negatives (§12; CP-02/03/09/12). Missing or partial: SPEC-013-dependent items, session tokens and scope errors, home migration/drain, snapshot export/import/staging (§11), Read/ReadReply frames, enforcement of the semantic argument/result/token limits and deadlines, the full field-level CodecManifest, vectors for disabled kinds, the compatibility matrix (CP-08 missing). Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Depends on:** [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-005](SPEC-005.md)–[SPEC-011](SPEC-011.md)
 **Trust owner:** [SPEC-013](SPEC-013.md)

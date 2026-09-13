@@ -1,6 +1,7 @@
 # SPEC-003 — Invariant & Effect IR
 
 **Status:** Draft 0.2 — proposed implementation contract; not implemented or proven
+**Implementation status (2026-09-12):** Implemented and tested in `crates/carolina-lang`: grammar, typed AST/IR, normalization, canonical encoding and hashes, reference interpreter, bounded counterexample explorer, the seven §12 fixtures with golden bytes; S003-A01–A04, A06–A10 plus structural-error, digest-sensitivity, mutation-fuzz (A09) and set/optional/effect-level tests. Gaps: A05 footprint tests (aliasing, phantom insertion, aggregate group movement, reference deletion), A11 as a compiler test, Range/Predicate key sets and DependencyHypergraph export (§8), a Monotonic pre/post evaluator (§5), operation-version immutability across publications (§3.1). Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md)
 **Consumed by:** [SPEC-004](SPEC-004.md); runtime SPECs 005–008; plan evolution in [SPEC-009](SPEC-009.md)

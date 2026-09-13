@@ -165,6 +165,132 @@ pub struct CatalogEntry {
     pub value: CanonValue,
 }
 
+impl Canonical for EntryState {
+    fn to_canon(&self) -> CanonValue {
+        CanonValue::Str(
+            match self {
+                EntryState::Live => "live",
+                EntryState::Tombstoned => "tombstoned",
+            }
+            .into(),
+        )
+    }
+    fn from_canon(v: &CanonValue) -> CoreResult<Self> {
+        Ok(match v.as_str()? {
+            "live" => EntryState::Live,
+            "tombstoned" => EntryState::Tombstoned,
+            k => {
+                return Err(CoreError::new(
+                    ErrorCode::NonCanonicalEncoding,
+                    format!("entry state {k}"),
+                ))
+            }
+        })
+    }
+}
+
+impl Canonical for CatalogEntry {
+    fn to_canon(&self) -> CanonValue {
+        CanonValue::obj()
+            .fc("key", &self.key)
+            .fstr("kind", "catalog_entry.v1")
+            .fc("revision", &self.revision)
+            .fc("state", &self.state)
+            .f("value", self.value.clone())
+            .build()
+    }
+    fn from_canon(v: &CanonValue) -> CoreResult<Self> {
+        v.expect_fields(&["key", "kind", "revision", "state", "value"])?;
+        Ok(CatalogEntry {
+            key: CatalogKey::from_canon(v.field("key")?)?,
+            revision: CatalogGeneration::from_canon(v.field("revision")?)?,
+            state: EntryState::from_canon(v.field("state")?)?,
+            value: v.field("value")?.clone(),
+        })
+    }
+}
+
+/// Point-in-time image of the catalog state machine (SPEC-011 §9).
+///
+/// It exists so a voter can recover its control-plane state without the log prefix that produced
+/// it. It is node-local durable state, like the Raft term/vote file: it is not an interchange
+/// record and has no registered record kind, because SPEC-012 owns the wire registry and snapshot
+/// *transfer* between nodes is not implemented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogSnapshot {
+    pub snapshot_version: u32,
+    /// Last log index folded into this image.
+    pub applied_index: u64,
+    pub generation: u64,
+    pub genesis: Option<BootstrapManifest>,
+    pub entries: Vec<CatalogEntry>,
+    pub results: Vec<CatalogCommit>,
+}
+
+impl CatalogSnapshot {
+    pub const VERSION: u32 = 1;
+}
+
+impl Canonical for CatalogSnapshot {
+    fn to_canon(&self) -> CanonValue {
+        CanonValue::obj()
+            .fu64("applied_index", self.applied_index)
+            .f(
+                "entries",
+                CanonValue::Array(self.entries.iter().map(|e| e.to_canon()).collect()),
+            )
+            .fu64("generation", self.generation)
+            .fopt("genesis", &self.genesis)
+            .fstr("kind", "catalog_snapshot.v1")
+            .f(
+                "results",
+                CanonValue::Array(self.results.iter().map(|r| r.to_canon()).collect()),
+            )
+            .fu32("snapshot_version", self.snapshot_version)
+            .build()
+    }
+    fn from_canon(v: &CanonValue) -> CoreResult<Self> {
+        v.expect_fields(&[
+            "applied_index",
+            "entries",
+            "generation",
+            "genesis",
+            "kind",
+            "results",
+            "snapshot_version",
+        ])?;
+        let snapshot_version = v.field("snapshot_version")?.as_u32()?;
+        if snapshot_version != CatalogSnapshot::VERSION {
+            return Err(CoreError::new(
+                ErrorCode::UnsupportedFormat,
+                format!("catalog snapshot version {snapshot_version}"),
+            ));
+        }
+        let genesis = match v.field("genesis")? {
+            CanonValue::Null => None,
+            g => Some(BootstrapManifest::from_canon(g)?),
+        };
+        Ok(CatalogSnapshot {
+            snapshot_version,
+            applied_index: v.field("applied_index")?.as_u64()?,
+            generation: v.field("generation")?.as_u64()?,
+            genesis,
+            entries: v
+                .field("entries")?
+                .as_array()?
+                .iter()
+                .map(CatalogEntry::from_canon)
+                .collect::<CoreResult<Vec<_>>>()?,
+            results: v
+                .field("results")?
+                .as_array()?
+                .iter()
+                .map(CatalogCommit::from_canon)
+                .collect::<CoreResult<Vec<_>>>()?,
+        })
+    }
+}
+
 impl CatalogEntry {
     pub fn digest(&self) -> Hash256 {
         domain_hash("astra.catalog-entry.v1", &self.value.encode())
@@ -707,6 +833,34 @@ impl Catalog {
     }
     pub fn applied_index(&self) -> u64 {
         self.applied_index
+    }
+
+    /// Fold the whole state machine into one image (SPEC-011 §9).
+    pub fn snapshot(&self) -> CatalogSnapshot {
+        CatalogSnapshot {
+            snapshot_version: CatalogSnapshot::VERSION,
+            applied_index: self.applied_index,
+            generation: self.generation,
+            genesis: self.genesis.clone(),
+            entries: self.entries.values().cloned().collect(),
+            results: self.results.values().cloned().collect(),
+        }
+    }
+
+    /// Rebuild a catalog from an image. Replaying the log after `applied_index` on top of the
+    /// result reproduces the state the image was taken from.
+    pub fn restore(s: &CatalogSnapshot) -> Catalog {
+        Catalog {
+            entries: s.entries.iter().map(|e| (e.key.clone(), e.clone())).collect(),
+            generation: s.generation,
+            applied_index: s.applied_index,
+            genesis: s.genesis.clone(),
+            results: s
+                .results
+                .iter()
+                .map(|r| (r.admin_request_id, r.clone()))
+                .collect(),
+        }
     }
     pub fn genesis(&self) -> Option<&BootstrapManifest> {
         self.genesis.as_ref()

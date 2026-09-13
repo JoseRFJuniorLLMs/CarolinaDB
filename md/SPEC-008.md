@@ -2,6 +2,7 @@
 
 **Subtitle:** Ordered Execution, Distributed Decisions and Atomic Publication
 **Status:** Draft 0.2 — proposed implementation contract; not an implemented or proven protocol
+**Implementation status (2026-09-12):** Single-IDC C5 slice implemented and tested (SPEC-014 MVP-3, gate Q3-C5 PASS): deterministic fixed three-voter Raft adapter with durable log and read barrier (§5), ordered Admit/Decision execution on every voter with fail-closed divergence (§8), replicated RequestHome, retry/replay/dedup (§16), three-process kill campaign C5-001/009/010/021. Missing: lock hierarchy (§7), TxnBegin/PrepareVote/DecisionCertificate and authority selection (§9), prepare/decision/install protocol (§10), publication layer (§11), SnapshotCut/coherent reads (§12), multi-IDC ordering (§13), mixed-class rules (§14), reconfiguration/evolution (§17), §19 metrics and half of the typed outcomes; milestones C5-C…G. Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Type:** Distributed runtime specification
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md)

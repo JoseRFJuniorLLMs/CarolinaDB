@@ -105,7 +105,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 
 /// Strict lowercase hexadecimal decoder: even length, only `0-9a-f`.
 pub fn hex_decode(s: &str) -> Result<Vec<u8>, CoreError> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(CoreError::new(
             ErrorCode::NonCanonicalEncoding,
             "odd hex length",

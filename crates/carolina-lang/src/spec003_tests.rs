@@ -80,7 +80,9 @@ fn uuid(n: u8) -> Value {
 
 fn lower_src(src: &str) -> Result<ModuleIR, ErrorCode> {
     let ast = parse_module(src, &Limits::v1()).map_err(|e| e.code)?;
-    lower_module(&ast, None).map(|(ir, _)| ir).map_err(|e| e.code)
+    lower_module(&ast, None)
+        .map(|(ir, _)| ir)
+        .map_err(|e| e.code)
 }
 
 fn s(v: &str) -> Value {
@@ -108,13 +110,25 @@ fn lowering_rejects_structural_errors_with_typed_codes() {
         "RECORD Profile { id: Uuid PRIMARY KEY, nick: String(16) }\nINVARIANT level_nonneg",
         1,
     );
-    assert_eq!(lower_src(&dup_record).unwrap_err(), ErrorCode::DuplicateIdentity);
+    assert_eq!(
+        lower_src(&dup_record).unwrap_err(),
+        ErrorCode::DuplicateIdentity
+    );
     let dup_op = base.replacen("OPERATION untag", "OPERATION tag", 1);
-    assert_eq!(lower_src(&dup_op).unwrap_err(), ErrorCode::DuplicateIdentity);
+    assert_eq!(
+        lower_src(&dup_op).unwrap_err(),
+        ErrorCode::DuplicateIdentity
+    );
     let unresolved = base.replacen("READ { p = Profile[id] }", "READ { p = Account[id] }", 1);
-    assert_eq!(lower_src(&unresolved).unwrap_err(), ErrorCode::MissingRecord);
+    assert_eq!(
+        lower_src(&unresolved).unwrap_err(),
+        ErrorCode::MissingRecord
+    );
     let optional_pk = base.replace("id: Uuid PRIMARY KEY", "id: Option<Uuid> PRIMARY KEY");
-    assert_eq!(lower_src(&optional_pk).unwrap_err(), ErrorCode::TypeMismatch);
+    assert_eq!(
+        lower_src(&optional_pk).unwrap_err(),
+        ErrorCode::TypeMismatch
+    );
 }
 
 /// S003-A03: a version, scale or invariant change alters exactly the digests that depend on it.
@@ -168,7 +182,11 @@ fn declaration_order_with_preserved_ids_is_byte_identical() {
     let reordered = format!("{head}{deposit}{transfer}");
     let ast2 = parse_module(&reordered, &Limits::v1()).unwrap();
     let (ir2, alloc2) = lower_module(&ast2, Some(&alloc)).unwrap();
-    assert_eq!(ir2.encode(), ir.encode(), "reordered module must lower to identical bytes");
+    assert_eq!(
+        ir2.encode(),
+        ir.encode(),
+        "reordered module must lower to identical bytes"
+    );
     assert_eq!(alloc2, alloc);
     // without the preserved allocation the ids (and therefore the bytes) may differ, but the
     // per-name schema semantics are the same
@@ -245,7 +263,11 @@ fn decoder_and_frontend_mutation_fuzz_never_panics() {
             match ModuleIR::decode(&m, &v1) {
                 Ok(back) => {
                     decoded_ok += 1;
-                    assert_eq!(back.encode(), m, "{name}: accepted input must be a fixed point");
+                    assert_eq!(
+                        back.encode(),
+                        m,
+                        "{name}: accepted input must be a fixed point"
+                    );
                 }
                 Err(e) => {
                     refused += 1;
@@ -299,8 +321,14 @@ fn decoder_and_frontend_mutation_fuzz_never_panics() {
     // Exercise the byte boundary directly: the fixture corpus may legitimately fit the
     // current tiny limits, so its size cannot serve as the negative control.
     let oversized = " ".repeat(tiny.max_source_bytes + 1);
-    assert_eq!(parse_module(&oversized, &tiny).unwrap_err().code, ErrorCode::ResourceLimit);
-    assert!(refused > decoded_ok, "mutations must mostly be refused ({refused} vs {decoded_ok})");
+    assert_eq!(
+        parse_module(&oversized, &tiny).unwrap_err().code,
+        ErrorCode::ResourceLimit
+    );
+    assert!(
+        refused > decoded_ok,
+        "mutations must mostly be refused ({refused} vs {decoded_ok})"
+    );
 }
 
 /// §6 / S003-A08: a partial release and a same-endpoint transfer are effect-level rejections that
@@ -331,20 +359,27 @@ fn partial_release_and_same_endpoint_transfer_are_rejected_at_the_effect() {
     let wrong_key = evaluate(&m, release, &[uuid(2), Value::I64(3), uuid(7)], &after).unwrap();
     assert!(!wrong_key.is_accepted());
 
-    let src = fixture_source("account_transfer")
-        .unwrap()
-        .replace("REQUIRE amount > 0 && source != destination", "REQUIRE amount > 0");
+    let src = fixture_source("account_transfer").unwrap().replace(
+        "REQUIRE amount > 0 && source != destination",
+        "REQUIRE amount > 0",
+    );
     let m2 = lower_src(&src).unwrap();
     let mut st2 = State::default();
     let ten = Value::Decimal(carolina_core::decimal::Decimal::new(1000, 18, 2).unwrap());
     st2.put_row(&m2, "Account", &[("id", uuid(1)), ("balance", ten.clone())])
         .unwrap();
-    st2.put_row(&m2, "Ledger", &[("id", Value::U64(0)), ("total", ten.clone())])
-        .unwrap();
+    st2.put_row(
+        &m2,
+        "Ledger",
+        &[("id", Value::U64(0)), ("total", ten.clone())],
+    )
+    .unwrap();
     let transfer = m2.operation_by_name("transfer").unwrap().identity;
     let one = Value::Decimal(carolina_core::decimal::Decimal::new(100, 18, 2).unwrap());
     let same = evaluate(&m2, transfer, &[uuid(1), uuid(1), one.clone()], &st2).unwrap();
-    let rej = same.rejection().expect("same-endpoint transfer is rejected");
+    let rej = same
+        .rejection()
+        .expect("same-endpoint transfer is rejected");
     assert_eq!(rej.code, ErrorCode::UnsupportedEffect);
     assert!(rej.reason.contains("distinct"), "{}", rej.reason);
     // a distinct destination that does not exist is a missing record, never a partial credit
@@ -374,10 +409,18 @@ fn optional_reads_and_set_effects_execute() {
     // probe: present row vs absent row through EXISTS and OPTIONAL
     let hit = evaluate(&m, op("probe"), &[uuid(1)], &st).unwrap();
     let res = hit.candidate().unwrap().result.clone();
-    assert!(matches!(&res, Value::Struct(f) if f["present"] == Value::Bool(true) && f["absent"] == Value::Bool(false)));
+    assert!(
+        matches!(&res, Value::Struct(f) if f["present"] == Value::Bool(true) && f["absent"] == Value::Bool(false))
+    );
     let miss = evaluate(&m, op("probe"), &[uuid(9)], &st).unwrap();
-    let res = miss.candidate().expect("optional read of a missing row is not a rejection").result.clone();
-    assert!(matches!(&res, Value::Struct(f) if f["present"] == Value::Bool(false) && f["absent"] == Value::Bool(true)));
+    let res = miss
+        .candidate()
+        .expect("optional read of a missing row is not a rejection")
+        .result
+        .clone();
+    assert!(
+        matches!(&res, Value::Struct(f) if f["present"] == Value::Bool(false) && f["absent"] == Value::Bool(true))
+    );
     // assign replaces the field
     let renamed = evaluate(&m, op("rename"), &[uuid(1), s("bob")], &st).unwrap();
     let st1 = renamed.candidate().unwrap().post_state.clone();
@@ -391,7 +434,11 @@ fn optional_reads_and_set_effects_execute() {
     );
     let again = evaluate(&m, op("tag"), &[uuid(1), s("b")], &st2).unwrap();
     assert_eq!(
-        again.candidate().unwrap().post_state.field(&m, "Profile", &uuid(1), "tags"),
+        again
+            .candidate()
+            .unwrap()
+            .post_state
+            .field(&m, "Profile", &uuid(1), "tags"),
         Some(Value::Set(BTreeSet::from([s("a"), s("b")])))
     );
     // remove: absent member is a no-op, present member removed
@@ -399,17 +446,94 @@ fn optional_reads_and_set_effects_execute() {
     assert!(untag_absent.is_accepted());
     let untagged = evaluate(&m, op("untag"), &[uuid(1), s("a")], &st2).unwrap();
     assert_eq!(
-        untagged.candidate().unwrap().post_state.field(&m, "Profile", &uuid(1), "tags"),
+        untagged
+            .candidate()
+            .unwrap()
+            .post_state
+            .field(&m, "Profile", &uuid(1), "tags"),
         Some(Value::Set(BTreeSet::from([s("b")])))
     );
     // compare-and-swap: matching expectation swaps; stale expectation is a Conflict
-    let promoted = evaluate(&m, op("promote"), &[uuid(1), Value::I64(1), Value::I64(2)], &st2).unwrap();
+    let promoted = evaluate(
+        &m,
+        op("promote"),
+        &[uuid(1), Value::I64(1), Value::I64(2)],
+        &st2,
+    )
+    .unwrap();
     let st3 = promoted.candidate().unwrap().post_state.clone();
-    assert_eq!(st3.field(&m, "Profile", &uuid(1), "level"), Some(Value::I64(2)));
-    let stale = evaluate(&m, op("promote"), &[uuid(1), Value::I64(1), Value::I64(3)], &st3).unwrap();
+    assert_eq!(
+        st3.field(&m, "Profile", &uuid(1), "level"),
+        Some(Value::I64(2))
+    );
+    let stale = evaluate(
+        &m,
+        op("promote"),
+        &[uuid(1), Value::I64(1), Value::I64(3)],
+        &st3,
+    )
+    .unwrap();
     assert_eq!(stale.rejection().unwrap().code, ErrorCode::Conflict);
     // invariant still guards the swapped value (level_nonneg) — REQUIRE keeps next >= 0, so a
     // negative target is a precondition rejection before any effect
-    let neg = evaluate(&m, op("promote"), &[uuid(1), Value::I64(2), Value::I64(-1)], &st3).unwrap();
+    let neg = evaluate(
+        &m,
+        op("promote"),
+        &[uuid(1), Value::I64(2), Value::I64(-1)],
+        &st3,
+    )
+    .unwrap();
     assert!(!neg.is_accepted());
+}
+
+/// SPEC-003 §5: a grouped aggregate must be writable at all. The group key stops below the
+/// comparison level, so `GROUP BY m.team <= 10` reads as "per team, the sum is at most 10"; when
+/// the key expression swallowed the comparison the invariant could not be parsed and every grouped
+/// bound was unreachable.
+#[test]
+fn grouped_aggregate_bound_parses_and_evaluates_per_group() {
+    let src = r#"
+RECORD Member { id: I64 PRIMARY KEY, team: I64, cost: I64 }
+INVARIANT per_team { AGGREGATE SUM(m.cost) FOR m IN Member GROUP BY m.team <= 10 }
+OPERATION raise_cost(id: I64, amount: I64) VERSION 1 {
+  REQUIRE amount > 0
+  READ { m = Member[id] }
+  EFFECT { INCREMENT Member[id].cost BY amount }
+  ENSURE true
+  RETURN { id: id }
+  CONTRACT {
+    atomicity: WholeInvocation, input_visibility: SerialScope, result_semantics: Receipt,
+    result_scope: Global(Member), session: {}, session_scope: None, durability: LocalStable,
+    partition_outcomes: { Unavailable }, refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable, request_namespace: "teams"
+  }
+}
+"#;
+    let m = lower_src(src).expect("a grouped aggregate must parse and lower");
+    let inv = &m.invariants[0];
+    assert_eq!(inv.name, "per_team");
+    let raise = m.operation_by_name("raise_cost").unwrap().identity;
+    let mut st = State::default();
+    for (id, team, cost) in [(1i64, 1i64, 6i64), (2, 2, 3)] {
+        st.put_row(
+            &m,
+            "Member",
+            &[
+                ("id", Value::I64(id)),
+                ("team", Value::I64(team)),
+                ("cost", Value::I64(cost)),
+            ],
+        )
+        .unwrap();
+    }
+    // team 1 holds 6: +3 fits, +5 does not, and team 2 is unaffected by either
+    assert!(evaluate(&m, raise, &[Value::I64(1), Value::I64(3)], &st)
+        .unwrap()
+        .is_accepted());
+    assert!(!evaluate(&m, raise, &[Value::I64(1), Value::I64(5)], &st)
+        .unwrap()
+        .is_accepted());
+    assert!(evaluate(&m, raise, &[Value::I64(2), Value::I64(7)], &st)
+        .unwrap()
+        .is_accepted());
 }

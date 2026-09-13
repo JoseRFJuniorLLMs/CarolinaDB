@@ -2,6 +2,7 @@
 
 **Subtitle:** Semantic Replication, Idempotent Application and Causal Observations
 **Status:** Draft 0.2 — proposed implementation contract; unimplemented and unverified
+**Implementation status (2026-09-12):** Not implemented (SPEC-014 MVP-5; gate Q3-PROTOCOLS NOT_RUN). Only neighbouring building blocks exist: typed OriginId/epochs and IdcBinding (§3), the RequestHome CAS (§3), strict bounded decoding (§6), the SnapshotManifestV1 codec with a placeholder semantic cut (§10) and compile-time rejection of C1/C2 candidates (C12-015). No SemanticCommitV1, CausalContextV1, session tokens, outbox/inbox, receive state machine, causal scheduler, anti-entropy, bootstrap or C12 campaign; gates R0–R4 unmet. Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md)
 **Integrates with:** [SPEC-006](SPEC-006.md), [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)

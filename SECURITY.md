@@ -27,3 +27,7 @@ only synthetic data; never attach production data or credentials.
 - The fault model exercised by the crash campaigns is process kill / short write inside one
   process. OS page-cache loss on power failure is not modelled; do not treat a PASS as evidence
   for it.
+- The node's only transport profile is `DEV_LOCAL`: plaintext `ASTR` frames, endpoint roles that
+  are unauthenticated declarations, and listeners/peers/clients that refuse any non-loopback
+  address. It is a test profile for trusted processes on one host, not a network security
+  boundary.

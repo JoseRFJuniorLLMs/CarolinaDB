@@ -20,6 +20,8 @@ fn usage() -> ExitCode {
         "carolina — CarolinaDB tools\n\n\
          USAGE:\n  carolina compile <module.cdl> [--out <dir>]     compile to canonical plans + certificate\n  \
          carolina explain <module.cdl> [operation]       EXPLAIN candidates, evidence and assumptions\n  \
+         carolina plan <module.cdl> [operation]          print the canonical OperationPlan artifact(s)\n  \
+         carolina graph invariants <module.cdl>          print IDC templates, affected records/invariants and interaction edges\n  \
          carolina check <dir>                            verify plans/certificate written by `compile`\n  \
          carolina ir <module.cdl>                         print canonical IR bytes and hashes\n  \
          carolina fixtures                                list embedded SPEC-003 fixtures\n  \
@@ -45,7 +47,15 @@ fn load(path: &Path) -> Result<carolina_lang::ir::ModuleIR, String> {
 fn run(args: &[String]) -> Result<ExitCode, String> {
     let option_spec: Option<(&[&str], &[&str])> = match args.first().map(String::as_str) {
         Some("qualify") => Some((
-            &["--out", "--seeds", "--ops", "--crash-nth", "--test-root", "--durability", "--skip"],
+            &[
+                "--out",
+                "--seeds",
+                "--ops",
+                "--crash-nth",
+                "--test-root",
+                "--durability",
+                "--skip",
+            ],
             &["--quick", "--keep-bundles"],
         )),
         Some("simulate") => Some((&["--seed", "--fault", "--ops", "--out", "--test-root"], &[])),
@@ -111,6 +121,47 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
                 },
                 None => print!("{}", explain::explain_all(&ir, &out)),
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Some("plan") => {
+            let path = args.get(1).ok_or("missing module path")?;
+            let ir = load(Path::new(path))?;
+            let out = compile(&CompileInput::local(ir.clone()))
+                .map_err(|e| format!("compile failed: {e}"))?;
+            let filter = args.get(2);
+            let mut shown = 0usize;
+            for p in &out.plans {
+                if filter.is_some_and(|f| f != &p.operation_name) {
+                    continue;
+                }
+                println!(
+                    "plan {} {} {}",
+                    p.operation_name,
+                    p.profile.family.label(),
+                    p.plan_hash()
+                );
+                println!("{}", String::from_utf8_lossy(&p.encode()));
+                shown += 1;
+            }
+            if shown == 0 {
+                return Err(format!(
+                    "unknown operation {}",
+                    filter.map(String::as_str).unwrap_or("")
+                ));
+            }
+            println!("certificate {}", out.certificate.certificate_hash());
+            println!("note: a plan is an artifact; activation requires catalog registration and qualification evidence (SPEC-004 §13)");
+            Ok(ExitCode::SUCCESS)
+        }
+        Some("graph") => {
+            if args.get(1).map(String::as_str) != Some("invariants") {
+                return Err("usage: carolina graph invariants <module.cdl>".into());
+            }
+            let path = args.get(2).ok_or("missing module path")?;
+            let ir = load(Path::new(path))?;
+            let out = compile(&CompileInput::local(ir.clone()))
+                .map_err(|e| format!("compile failed: {e}"))?;
+            print!("{}", render_invariant_graph(&ir, &out));
             Ok(ExitCode::SUCCESS)
         }
         Some("check") => {
@@ -229,7 +280,9 @@ fn validate_flags(args: &[String], values: &[&str], switches: &[&str]) -> Result
             return Err(format!("duplicate option {name}"));
         }
         if values.contains(&name) {
-            let value = args.get(i + 1).ok_or_else(|| format!("{name} requires a value"))?;
+            let value = args
+                .get(i + 1)
+                .ok_or_else(|| format!("{name} requires a value"))?;
             if value.starts_with("--") || value.trim().is_empty() {
                 return Err(format!("{name} requires a value"));
             }
@@ -262,41 +315,41 @@ fn default_test_root() -> PathBuf {
 fn qualify(args: &[String]) -> Result<ExitCode, String> {
     use carolina_qualify::runner::{run_campaign, CampaignConfig, ConfigError};
     let parsed = (|| -> Result<CampaignConfig, String> {
-    let root = repo_root();
-    let test_root = flag(args, "--test-root")
-        .map(PathBuf::from)
-        .unwrap_or_else(default_test_root);
-    let mut cfg = if has(args, "--quick") {
-        CampaignConfig::quick(&root, &test_root)
-    } else {
-        CampaignConfig::standard(&root, &test_root)
-    };
-    cfg.out_dir = flag(args, "--out").map(PathBuf::from);
-    if let Some(s) = flag(args, "--seeds") {
-        cfg.seeds = s.split(',').map(|x| {
+        let root = repo_root();
+        let test_root = flag(args, "--test-root")
+            .map(PathBuf::from)
+            .unwrap_or_else(default_test_root);
+        let mut cfg = if has(args, "--quick") {
+            CampaignConfig::quick(&root, &test_root)
+        } else {
+            CampaignConfig::standard(&root, &test_root)
+        };
+        cfg.out_dir = flag(args, "--out").map(PathBuf::from);
+        if let Some(s) = flag(args, "--seeds") {
+            cfg.seeds = s.split(',').map(|x| {
             x.trim().parse().map_err(|_| format!("invalid seed `{x}`; --seeds requires comma-separated unsigned integers"))
         }).collect::<Result<Vec<_>, _>>()?;
-    }
-    if let Some(n) = flag(args, "--ops") {
-        cfg.ops_per_schedule = n.parse().map_err(|_| "--ops must be an integer")?;
-    }
-    if let Some(n) = flag(args, "--crash-nth") {
-        cfg.crash_nth_max = n.parse().map_err(|_| "--crash-nth must be an integer")?;
-    }
-    if let Some(d) = flag(args, "--durability") {
-        cfg.durability_mode = d.into();
-    }
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--skip" {
-            if let Some(id) = args.get(i + 1) {
-                cfg.skip.push(id.clone());
-            }
         }
-        i += 1;
-    }
-    cfg.keep_passing_bundles = has(args, "--keep-bundles");
-    Ok(cfg)
+        if let Some(n) = flag(args, "--ops") {
+            cfg.ops_per_schedule = n.parse().map_err(|_| "--ops must be an integer")?;
+        }
+        if let Some(n) = flag(args, "--crash-nth") {
+            cfg.crash_nth_max = n.parse().map_err(|_| "--crash-nth must be an integer")?;
+        }
+        if let Some(d) = flag(args, "--durability") {
+            cfg.durability_mode = d.into();
+        }
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--skip" {
+                if let Some(id) = args.get(i + 1) {
+                    cfg.skip.push(id.clone());
+                }
+            }
+            i += 1;
+        }
+        cfg.keep_passing_bundles = has(args, "--keep-bundles");
+        Ok(cfg)
     })();
     let cfg = match parsed {
         Ok(cfg) => cfg,
@@ -389,8 +442,13 @@ fn simulate(args: &[String]) -> Result<ExitCode, String> {
     let failed = results
         .iter()
         .any(|c| c.status == carolina_qualify::verdict::Status::Fail);
-    let inconclusive = results.iter().any(|c| matches!(c.status,
-        carolina_qualify::verdict::Status::Inconclusive | carolina_qualify::verdict::Status::NotRun));
+    let inconclusive = results.iter().any(|c| {
+        matches!(
+            c.status,
+            carolina_qualify::verdict::Status::Inconclusive
+                | carolina_qualify::verdict::Status::NotRun
+        )
+    });
     Ok(ExitCode::from(if failed {
         1
     } else if inconclusive {
@@ -420,10 +478,7 @@ fn replay(args: &[String], do_minimize: bool) -> Result<ExitCode, String> {
     .map_err(|e| e.to_string())?;
     let budget = b.manifest.run_budget.checker_budget as usize;
     let (history, results, verify_error) = check_schedule(&test_root, &sched, budget)?;
-    let same_trace = b
-        .history
-        .as_ref()
-        .map(|h| h.trace_digest() == history.trace_digest());
+    let same_trace = history.trace_digest() == b.verdict.trace_digest;
     println!(
         "replayed seed {} fault {:?}: {} events, trace {} (matches bundle: {:?})",
         sched.seed,
@@ -438,10 +493,12 @@ fn replay(args: &[String], do_minimize: bool) -> Result<ExitCode, String> {
     print_checks(&results);
     let fails =
         |r: &[carolina_qualify::verdict::CheckResult]| r.iter().any(|c| c.status == Status::Fail);
-    let incomplete = results.iter().any(|c| matches!(c.status, Status::Inconclusive | Status::NotRun));
+    let incomplete = results
+        .iter()
+        .any(|c| matches!(c.status, Status::Inconclusive | Status::NotRun));
     if !do_minimize {
         return Ok(ExitCode::from(
-            if fails(&results) || verify_error.is_some() || same_trace == Some(false) {
+            if fails(&results) || verify_error.is_some() || !same_trace {
                 1
             } else if incomplete {
                 3
@@ -452,10 +509,12 @@ fn replay(args: &[String], do_minimize: bool) -> Result<ExitCode, String> {
     }
     if !fails(&results) && verify_error.is_none() {
         if incomplete {
-            println!("cannot establish a failure to minimize: checker is inconclusive or did not run");
+            println!(
+                "cannot establish a failure to minimize: checker is inconclusive or did not run"
+            );
             return Ok(ExitCode::from(3));
         }
-        if same_trace == Some(false) {
+        if !same_trace {
             println!("replay differs from retained history; no checker failure to minimize");
             return Ok(ExitCode::FAILURE);
         }
@@ -580,6 +639,104 @@ fn workload(dir: &Path, available: i64) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// `carolina graph invariants`: the conservative closure the compiler derived (SPEC-004 §4/§6) —
+/// IDC templates with their records and invariants, every operation's affected records and
+/// templates, the directed interaction edges and the implicit invariants the closure added.
+fn render_invariant_graph(
+    ir: &carolina_lang::ir::ModuleIR,
+    out: &carolina_compiler::CompileOutput,
+) -> String {
+    use std::fmt::Write as _;
+    let rec = |id: carolina_core::ids::RecordId| {
+        ir.record(id)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|_| format!("{id:?}"))
+    };
+    let inv = |id: carolina_core::ids::InvariantId| {
+        ir.invariant(id)
+            .map(|i| i.name.clone())
+            .unwrap_or_else(|_| format!("{id:?}"))
+    };
+    let op = |r: carolina_core::ids::OperationRef| {
+        ir.operations
+            .iter()
+            .find(|o| o.identity == r)
+            .map(|o| format!("{}@{}", o.name, r.version))
+            .unwrap_or_else(|| format!("{r:?}"))
+    };
+    let join = |v: Vec<String>| {
+        if v.is_empty() {
+            "-".to_string()
+        } else {
+            v.join(", ")
+        }
+    };
+    let mut s = String::new();
+    let _ = writeln!(s, "IDC templates ({}):", out.closure.templates.len());
+    for t in &out.closure.templates {
+        let _ = writeln!(
+            s,
+            "  {} [{}] records: {} invariants: {}",
+            t.name,
+            if t.per_key { "per-key" } else { "global" },
+            join(t.records.iter().map(|r| rec(*r)).collect()),
+            join(t.invariants.iter().map(|i| inv(*i)).collect())
+        );
+    }
+    let _ = writeln!(s, "Operations ({}):", out.closure.op_records.len());
+    for (o, records) in &out.closure.op_records {
+        let templates = out
+            .closure
+            .op_templates
+            .get(o)
+            .map(|ts| {
+                ts.iter()
+                    .filter_map(|i| out.closure.templates.get(*i))
+                    .map(|t| t.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let invariants = out
+            .closure
+            .op_invariants
+            .get(o)
+            .map(|is| is.iter().map(|i| inv(*i)).collect())
+            .unwrap_or_default();
+        let _ = writeln!(
+            s,
+            "  {} records: {} invariants: {} templates: {}",
+            op(*o),
+            join(records.iter().map(|r| rec(*r)).collect()),
+            join(invariants),
+            join(templates)
+        );
+    }
+    let _ = writeln!(s, "Interaction edges ({}):", out.interaction_graph.len());
+    for e in &out.interaction_graph {
+        let _ = writeln!(
+            s,
+            "  {} -> {} {} [{}] invariants: {}",
+            op(e.predecessor),
+            op(e.successor),
+            e.kind.label(),
+            e.key_relation,
+            join(e.invariant_refs.iter().map(|i| inv(*i)).collect())
+        );
+    }
+    if !out.closure.implicit_invariants.is_empty() {
+        let _ = writeln!(
+            s,
+            "Implicit invariants ({}):",
+            out.closure.implicit_invariants.len()
+        );
+        for i in &out.closure.implicit_invariants {
+            let _ = writeln!(s, "  {i}");
+        }
+    }
+    s.push_str("note: the closure is conservative (SPEC-004 §4); it is an analysis artifact, not an activation\n");
+    s
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
@@ -588,5 +745,79 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_file(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("carolina-cli-unit-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.cdl"));
+        std::fs::write(
+            &path,
+            carolina_lang::fixtures::fixture_source(name).unwrap(),
+        )
+        .unwrap();
+        path
+    }
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `carolina plan` / `carolina graph invariants` are deterministic artifact operations
+    /// (SPEC-004 §13): they succeed on every fixture, refuse unknown operations and never write.
+    #[test]
+    fn plan_and_graph_commands_are_artifact_operations() {
+        let path = fixture_file("account_transfer");
+        let p = path.to_string_lossy().to_string();
+        assert!(run(&args(&["plan", &p])).is_ok());
+        assert!(run(&args(&["plan", &p, "transfer"])).is_ok());
+        assert!(run(&args(&["plan", &p, "no_such_operation"]))
+            .unwrap_err()
+            .contains("unknown operation"));
+        assert!(run(&args(&["graph", "invariants", &p])).is_ok());
+        assert!(run(&args(&["graph", "records", &p])).is_err());
+        let ir = load(&path).unwrap();
+        let out = compile(&CompileInput::local(ir.clone())).unwrap();
+        let text = render_invariant_graph(&ir, &out);
+        assert!(text.contains("IDC templates"));
+        assert!(text.contains("conservation"));
+        assert!(text.contains("transfer@1"));
+        assert!(text.contains("Interaction edges"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// `compile --out` followed by `check` round-trips the artifacts; a tampered plan file fails.
+    #[test]
+    fn compile_out_then_check_roundtrips_and_detects_tampering() {
+        let path = fixture_file("inventory_sell");
+        let p = path.to_string_lossy().to_string();
+        let out_dir = path.parent().unwrap().join("artifacts");
+        let o = out_dir.to_string_lossy().to_string();
+        assert!(run(&args(&["compile", &p, "--out", &o])).is_ok());
+        assert!(run(&args(&["check", &o])).is_ok());
+        let plan_file = out_dir.join("plan-sell.json");
+        let mut bytes = std::fs::read(&plan_file).unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let tampered = text.replacen(
+            "\"remote_participants\":\"0\"",
+            "\"remote_participants\":\"1\"",
+            1,
+        );
+        assert_ne!(
+            tampered, text,
+            "tamper anchor must exist in the plan artifact"
+        );
+        bytes = tampered.into_bytes();
+        std::fs::write(&plan_file, bytes).unwrap();
+        assert!(run(&args(&["check", &o]))
+            .unwrap_err()
+            .contains("CHECK FAILED"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

@@ -1,6 +1,7 @@
 # SPEC-013 — Security, Authentication & Trust Model
 
 **Status:** Draft 0.1; implementation and security qualification remain open.
+**Implementation status (2026-09-12):** Not implemented (QI-SECURITY NOT_RUN). The node speaks only the plaintext `DEV_LOCAL` profile, now restricted to loopback addresses; there is no TLS/mTLS, credential record, authorization or policy check, signed payload, audit record, encrypted backup, rotation or revocation, and ErrorCode has no authorization errors. Present foundations: request-hash identity conflicts, receipt immutability, AdminRequestId idempotence, retired-grant non-resurrection, Hello/HelloAck downgrade protection, bounded parsers with negative vectors. SEC-01…16 unmet (SEC-04/06/07/12/13 partial). The TLS dependency is an owner decision. Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Depends on:** [SPEC-011](SPEC-011.md) for identities, catalog policy and fencing; [SPEC-012](SPEC-012.md) for client identity, canonical payloads and compatibility.
 **Applies to:** the storage, replication, escrow, certification, serial and migration boundaries of SPEC-002 and SPEC-005–009.

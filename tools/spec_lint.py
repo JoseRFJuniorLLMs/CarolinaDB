@@ -11,6 +11,9 @@ Checks, over md/SPEC-*.md and README.md:
   6. product-name residue                (AstraDB / astra-* crates / `astra <cmd>` CLI; astra.* domains are allowed)
   7. formal gate references              (FM-1/FM-2/FM-3 must be defined in SPEC-010)
 
+Run with `--self-test` to execute the negative control: each check is applied to a crafted bad
+document and must report an error (plus a clean document that must report none).
+
 Exit code 0 = PASS, 1 = FAIL, 2 = invalid invocation. Stdlib only; deterministic output.
 """
 from __future__ import annotations
@@ -20,6 +23,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parent.parent
 MD_DIR = ROOT / "md"
@@ -116,6 +120,14 @@ HEADING_RE = re.compile(r"^#{1,6}\s*(?:Part\s+[IVXLC]+\s+—\s+)?(\d+)(?:\.(\d+)
 FM_REF_RE = re.compile(r"\bFM-(\d)\b")
 
 
+def rel(path: Path) -> str:
+    """Repository-relative path; falls back to the bare name for the self-test scratch files."""
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:
+        return path.name
+
+
 @dataclass
 class Report:
     errors: list[str] = field(default_factory=list)
@@ -123,10 +135,10 @@ class Report:
     checked_files: int = 0
 
     def err(self, path: Path, line: int, msg: str) -> None:
-        self.errors.append(f"{path.relative_to(ROOT).as_posix()}:{line}: {msg}")
+        self.errors.append(f"{rel(path)}:{line}: {msg}")
 
     def warn(self, path: Path, line: int, msg: str) -> None:
-        self.warnings.append(f"{path.relative_to(ROOT).as_posix()}:{line}: {msg}")
+        self.warnings.append(f"{rel(path)}:{line}: {msg}")
 
 
 def spec_id_of(path: Path) -> str | None:
@@ -188,7 +200,7 @@ def lint_file(path: Path, specs: dict[str, set[int]], report: Report) -> None:
                 target = m.group(1).strip()
                 if re.match(r"^[a-z]+://", target):
                     continue
-                if not (path.parent / target).resolve().exists():
+                if not (path.parent / unquote(target)).resolve().exists():
                     report.err(path, no, f"dangling link `{target}`")
             continue
 
@@ -226,7 +238,7 @@ def lint_file(path: Path, specs: dict[str, set[int]], report: Report) -> None:
                 target = m.group(1).strip()
                 if re.match(r"^[a-z]+://", target) or target.startswith("mailto:"):
                     continue
-                candidate = (path.parent / target).resolve()
+                candidate = (path.parent / unquote(target)).resolve()
                 if not candidate.exists():
                     report.err(path, no, f"dangling link `{target}`")
 
@@ -250,17 +262,73 @@ def check_fm_definitions(report: Report) -> None:
             report.err(spec010, 1, f"FM-{gate} gate is not defined in SPEC-010 §16")
 
 
+# ---------------------------------------------------------------------------
+# Negative control (SPEC-010 §18 discipline: a checker that cannot fail is not evidence)
+# ---------------------------------------------------------------------------
+
+SELF_TEST_CASES = [
+    # (label, body of a synthetic SPEC-009 document, substring the error message must contain)
+    ("forbidden alias", "The record carries `IdcEpoch` as its generation.\n", "IdcEpoch"),
+    ("bare epoch alias", "MigrationRecord { authority_epoch: u64 }\n", "authority_epoch"),
+    ("foreign schema owner", "```text\nFinalReceiptV1 {\n  txn_id: TxnId\n}\n```\n", "FinalReceipt"),
+    ("dangling spec reference", "See [SPEC-099](SPEC-099.md) for details.\n", "SPEC-099"),
+    ("dangling section reference", "See SPEC-010 §997 for details.\n", "997"),
+    ("dangling relative link", "See [notes](../docs/NO-SUCH-FILE.md).\n", "NO-SUCH-FILE"),
+    ("naming residue", "AstraDB SHALL persist the batch.\n", "AstraDB"),
+]
+
+
+def self_test(specs: dict[str, set[int]]) -> int:
+    """Apply every check to a crafted bad document; each one MUST report an error.
+
+    This is the artifact behind the "negative control verified" claim in docs/STATUS.md: without
+    it, a lint whose patterns silently stopped matching would still print PASS.
+    """
+    import tempfile
+
+    failures: list[str] = []
+    header = "# SPEC-009 — synthetic negative control\n\n"
+    with tempfile.TemporaryDirectory(prefix="spec-lint-self-test-") as tmp:
+        for label, body, marker in SELF_TEST_CASES:
+            path = Path(tmp) / "SPEC-009.md"
+            path.write_text(header + body, encoding="utf-8")
+            report = Report()
+            lint_file(path, specs, report)
+            hit = [e for e in report.errors if marker in e]
+            print(f"  {'ok  ' if hit else 'MISS'} {label}: {len(report.errors)} error(s)")
+            if not hit:
+                failures.append(f"{label}: no error mentioning {marker!r} (errors: {report.errors})")
+        clean = Path(tmp) / "SPEC-009.md"
+        clean.write_text(
+            header + "The migration uses `IdcBinding` and preserves `RequestKey`.\n",
+            encoding="utf-8",
+        )
+        report = Report()
+        lint_file(clean, specs, report)
+        ok = not report.errors
+        print(f"  {'ok  ' if ok else 'MISS'} positive control: {len(report.errors)} error(s)")
+        if not ok:
+            failures.append(f"positive control produced errors: {report.errors}")
+    for f in failures:
+        print(f"FAIL self-test {f}")
+    status = "PASS" if not failures else "FAIL"
+    print(f"spec_lint self-test: {status} ({len(SELF_TEST_CASES)} negative + 1 positive control)")
+    return 0 if not failures else 1
+
+
 def main(argv: list[str]) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:  # pragma: no cover
         pass
-    if len(argv) > 1 and argv[1] not in ("--verbose", "-v"):
+    if len(argv) > 1 and argv[1] not in ("--verbose", "-v", "--self-test"):
         print(__doc__)
         return 2
-    verbose = len(argv) > 1
+    verbose = argv[1:] == ["--verbose"] or argv[1:] == ["-v"]
     spec_files = sorted(p for p in MD_DIR.glob("SPEC-*.md") if spec_id_of(p))
     specs = {spec_id_of(p): load_headings(p) for p in spec_files if spec_id_of(p)}
+    if argv[1:] == ["--self-test"]:
+        return self_test(specs)
     report = Report()
     for p in spec_files + [ROOT / "README.md", MD_DIR / "SPEC-OWNERSHIP.md"]:
         lint_file(p, specs, report)

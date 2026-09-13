@@ -76,6 +76,9 @@ pub enum Message {
         /// On success: highest index now matching; on failure: the follower's last index (hint).
         match_index: u64,
         read_round: u64,
+        /// Highest index this voter has durably applied. The leader keeps the minimum across the
+        /// membership as the compaction horizon: no entry at or below it can still be needed.
+        applied_index: u64,
     },
 }
 
@@ -118,7 +121,9 @@ impl Canonical for Message {
                 success,
                 match_index,
                 read_round,
+                applied_index,
             } => CanonValue::obj()
+                .fu64("applied_index", *applied_index)
                 .fstr("kind", "AppendEntriesReply")
                 .fu64("match_index", *match_index)
                 .fu64("read_round", *read_round)
@@ -157,6 +162,7 @@ impl Canonical for Message {
                 success: v.field("success")?.as_bool()?,
                 match_index: u("match_index")?,
                 read_round: u("read_round")?,
+                applied_index: u("applied_index")?,
             },
             k => {
                 return Err(CoreError::new(
@@ -253,6 +259,15 @@ pub struct Raft<S: RaftStorage> {
     rng: DetRng,
     outbox: Vec<Envelope>,
     read_round: u64,
+    /// Log base after compaction: entries up to and including this index are covered by the
+    /// applied state and no longer stored (SPEC-011 §9).
+    snapshot_index: u64,
+    snapshot_term: u64,
+    /// Highest index this voter has durably applied, and the leader's view of the others.
+    applied: u64,
+    peer_applied: BTreeMap<NodeId, u64>,
+    /// Times this leader could not serve a follower because the entries it needs were compacted.
+    pub followers_behind_snapshot: u64,
     pending_reads: Vec<(u64, u64, BTreeSet<NodeId>)>, // (round, index, acks)
     ready_reads: Vec<ReadIndex>,
     /// Leader terms observed (for diagnostics/tests).
@@ -276,7 +291,12 @@ impl<S: RaftStorage> Raft<S> {
             voted_for: p.voted_for,
             log: p.entries,
             commit_index: 0,
-            last_delivered: 0,
+            snapshot_index: p.snapshot_index,
+            snapshot_term: p.snapshot_term,
+            applied: p.snapshot_index,
+            peer_applied: BTreeMap::new(),
+            followers_behind_snapshot: 0,
+            last_delivered: p.snapshot_index,
             role: Role::Follower,
             leader: None,
             votes: BTreeSet::new(),
@@ -315,7 +335,25 @@ impl<S: RaftStorage> Raft<S> {
         self.commit_index
     }
     pub fn last_index(&self) -> u64 {
-        self.log.last().map(|e| e.index).unwrap_or(0)
+        self.log.last().map(|e| e.index).unwrap_or(self.snapshot_index)
+    }
+
+    /// First index still stored; entries below it are covered by the applied-state snapshot.
+    pub fn first_index(&self) -> u64 {
+        self.snapshot_index + 1
+    }
+
+    /// Last index covered by the snapshot (0 when nothing has been compacted).
+    pub fn snapshot_index(&self) -> u64 {
+        self.snapshot_index
+    }
+
+    /// Position of `index` inside the stored log.
+    fn log_pos(&self, index: u64) -> Option<usize> {
+        if index <= self.snapshot_index {
+            return None;
+        }
+        usize::try_from(index - self.snapshot_index - 1).ok()
     }
     pub fn config(&self) -> &Config {
         &self.cfg
@@ -330,12 +368,15 @@ impl<S: RaftStorage> Raft<S> {
         if index == 0 || index > self.last_index() {
             return None;
         }
-        self.log.get((index - 1) as usize)
+        self.log.get(self.log_pos(index)?)
     }
     fn last_term(&self) -> u64 {
-        self.log.last().map(|e| e.term).unwrap_or(0)
+        self.log.last().map(|e| e.term).unwrap_or(self.snapshot_term)
     }
     fn term_at(&self, index: u64) -> u64 {
+        if index == self.snapshot_index {
+            return self.snapshot_term;
+        }
         self.entry(index).map(|e| e.term).unwrap_or(0)
     }
 
@@ -374,8 +415,53 @@ impl<S: RaftStorage> Raft<S> {
     }
 
     /// After a restart the application tells the log which prefix it already applied durably.
+    /// Record how far the state machine has durably applied. Lagging behind the truth is safe:
+    /// it only holds the compaction horizon back.
     pub fn set_applied(&mut self, applied: u64) {
-        self.last_delivered = applied.min(self.last_index());
+        self.last_delivered = applied.min(self.last_index()).max(self.snapshot_index);
+        self.applied = self.applied.max(applied.min(self.last_index()));
+    }
+
+    /// Test hook: pretend a follower asked for `next`, to exercise the refusal path of a peer
+    /// whose entries this leader has compacted away.
+    #[cfg(test)]
+    pub fn force_next_index(&mut self, peer: NodeId, next: u64) {
+        self.next_index.insert(peer, next);
+    }
+
+    /// Highest index every voter has durably applied, as far as this node knows. A member that
+    /// has never answered counts as zero, so a leader that has just been elected compacts nothing
+    /// until it has heard from the others.
+    pub fn compaction_horizon(&self) -> u64 {
+        let mut h = self.applied;
+        for m in &self.cfg.members {
+            if *m == self.me {
+                continue;
+            }
+            h = h.min(self.peer_applied.get(m).copied().unwrap_or(0));
+        }
+        h.min(self.commit_index)
+    }
+
+    /// Drop the log prefix every voter has applied, up to `up_to`. Returns the new base. The term
+    /// of the base must still be known, so the prefix is never cut past what this node stores.
+    pub fn compact(&mut self, up_to: u64) -> CoreResult<u64> {
+        let target = up_to.min(self.compaction_horizon()).min(self.last_index());
+        if target <= self.snapshot_index {
+            return Ok(self.snapshot_index);
+        }
+        let term = self.term_at(target);
+        if term == 0 {
+            return Ok(self.snapshot_index);
+        }
+        self.storage.compact_to(target, term)?;
+        let keep = self.log_pos(target + 1).unwrap_or(self.log.len());
+        self.log.drain(..keep.min(self.log.len()));
+        self.snapshot_index = target;
+        self.snapshot_term = term;
+        self.last_delivered = self.last_delivered.max(target);
+        self.applied = self.applied.max(target);
+        Ok(target)
     }
 
     pub fn take_ready_reads(&mut self) -> Vec<ReadIndex> {
@@ -511,13 +597,19 @@ impl<S: RaftStorage> Raft<S> {
     }
 
     fn send_append(&mut self, to: NodeId, read_round: u64) {
-        let next = *self.next_index.get(&to).unwrap_or(&1);
+        let next = *self.next_index.get(&to).unwrap_or(&(self.snapshot_index + 1));
+        if next <= self.snapshot_index {
+            // The follower needs entries this leader compacted. v1 has no snapshot transfer, so
+            // this fails closed and loudly instead of sending a log the follower cannot splice
+            // (SPEC-011 §9: a lagging member is rebuilt, never silently repaired).
+            self.followers_behind_snapshot += 1;
+            return;
+        }
         let prev_log_index = next.saturating_sub(1);
         let prev_log_term = self.term_at(prev_log_index);
-        let entries: Vec<Entry> = if next <= self.last_index() {
-            self.log[(next - 1) as usize..].to_vec()
-        } else {
-            Vec::new()
+        let entries: Vec<Entry> = match self.log_pos(next) {
+            Some(pos) if next <= self.last_index() => self.log[pos..].to_vec(),
+            _ => Vec::new(),
         };
         let msg = Message::AppendEntries {
             term: self.term,
@@ -611,6 +703,7 @@ impl<S: RaftStorage> Raft<S> {
                             success: false,
                             match_index: self.last_index(),
                             read_round,
+                            applied_index: self.applied,
                         },
                     );
                     return Ok(());
@@ -635,6 +728,7 @@ impl<S: RaftStorage> Raft<S> {
                             success: false,
                             match_index: hint,
                             read_round,
+                            applied_index: self.applied,
                         },
                     );
                     return Ok(());
@@ -652,7 +746,9 @@ impl<S: RaftStorage> Raft<S> {
                                 ));
                             }
                             self.storage.truncate_from(e.index)?;
-                            self.log.truncate((e.index - 1) as usize);
+                            if let Some(pos) = self.log_pos(e.index) {
+                                self.log.truncate(pos);
+                            }
                             first_new = Some(i);
                             break;
                         }
@@ -683,6 +779,7 @@ impl<S: RaftStorage> Raft<S> {
                         success: true,
                         match_index: last_new,
                         read_round,
+                        applied_index: self.applied,
                     },
                 );
             }
@@ -691,7 +788,10 @@ impl<S: RaftStorage> Raft<S> {
                 success,
                 match_index,
                 read_round,
+                applied_index,
             } => {
+                let known = self.peer_applied.entry(from).or_insert(0);
+                *known = (*known).max(applied_index);
                 if term > self.term {
                     self.become_follower(term, None)?;
                     return Ok(());

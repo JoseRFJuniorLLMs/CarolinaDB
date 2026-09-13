@@ -35,7 +35,7 @@
 | Name | Status |
 |---|---|
 | `CarolinaDB` | Product and database name |
-| `carolina-*` | Crate names (`carolina-core`, `carolina-lang`, `carolina-compiler`, `carolina-storage`, `carolina-wire`, `carolina-runtime`, `carolina-consensus`, `carolina-catalog`, `carolina-qual`, `carolina-models`, `carolina-cli`, `carolina-server`) |
+| `carolina-*` | Crate names (`carolina-core`, `carolina-lang`, `carolina-compiler`, `carolina-storage`, `carolina-wire`, `carolina-runtime`, `carolina-consensus`, `carolina-catalog`, `carolina-node`, `carolina-qualify`, `carolina-models`, `carolina-cli`) |
 | `carolina` | CLI binary |
 | `astra.*` | Permanent protocol codename for hash domains (byte-stable) |
 | `ASTR`, `astra://`, `.astr`, `.astj` | Wire magic, URI SAN scheme, data/journal file extensions |

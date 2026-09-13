@@ -289,10 +289,16 @@ fn duplicate_commit_of_a_decided_transaction_is_refused() {
     drop(s);
     let mut s = Store::open(&dir, opts()).unwrap();
     assert_eq!(s.durable_commit_seq(), seq_after_first);
-    assert_eq!(s.txn_status(txn(9)).unwrap().unwrap().phase, TxnPhase::Terminal);
+    assert_eq!(
+        s.txn_status(txn(9)).unwrap().unwrap().phase,
+        TxnPhase::Terminal
+    );
     let mut m = carolina_storage::memkernel::MemKernel::new();
     m.commit(b.clone()).unwrap();
-    assert_eq!(m.commit(b).unwrap_err().code, ErrorCode::TxnAlreadyCommitted);
+    assert_eq!(
+        m.commit(b).unwrap_err().code,
+        ErrorCode::TxnAlreadyCommitted
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -303,8 +309,16 @@ fn oversized_key_and_value_are_refused_before_persistence() {
     use carolina_storage::format::{MAX_KEY_LEN, MAX_VALUE_LEN};
     let dir = temp_dir("kernel-oversized");
     let mut s = Store::create(&dir, opts()).unwrap();
-    let big_value = batch(1, &[(user_key(1, 1), vec![7u8; MAX_VALUE_LEN + 1])], &[], true);
-    assert_eq!(s.commit(big_value).unwrap_err().code, ErrorCode::ValueTooLarge);
+    let big_value = batch(
+        1,
+        &[(user_key(1, 1), vec![7u8; MAX_VALUE_LEN + 1])],
+        &[],
+        true,
+    );
+    assert_eq!(
+        s.commit(big_value).unwrap_err().code,
+        ErrorCode::ValueTooLarge
+    );
     let big_key = LogicalKey(vec![1u8; MAX_KEY_LEN + 1]);
     let bk = batch(2, &[(big_key, b"v".to_vec())], &[], true);
     assert_eq!(s.commit(bk).unwrap_err().code, ErrorCode::KeyTooLarge);
@@ -345,4 +359,153 @@ fn wal_before_page_refuses_an_undurable_flush() {
 #[test]
 fn memkernel_matches_store_on_random_workload() {
     carolina_storage::campaign::kernel_differential(11, 300).unwrap();
+}
+
+/// SPEC-002 §87–§91 (S10): a checkpoint reclaims MVCC versions that no reader can select again,
+/// while every registered snapshot keeps reading exactly what it read before. The reclaimed
+/// database recovers to the same logical state and passes a full structural verify.
+#[test]
+fn checkpoint_reclaims_invisible_versions_and_never_a_registered_snapshot() {
+    let dir = temp_dir("kernel-mvcc-gc");
+    let mut s = Store::create(&dir, opts()).unwrap();
+    // 40 versions of one key plus a second key that is deleted at the end
+    for i in 1..=40u64 {
+        s.commit(batch(
+            i,
+            &[
+                (user_key(1, 1), vec![i as u8]),
+                (user_key(1, 2), vec![i as u8]),
+            ],
+            &[],
+            true,
+        ))
+        .unwrap();
+    }
+    // a reader that registered at version 40 must keep seeing version 40 after the checkpoint
+    let pinned = s.snapshot();
+    for i in 41..=60u64 {
+        s.commit(batch(i, &[(user_key(1, 1), vec![i as u8])], &[], true))
+            .unwrap();
+    }
+    let before = state_digest(&mut s).unwrap();
+    let pinned_value = s.get(&user_key(1, 1), pinned).unwrap();
+    assert_eq!(pinned_value, Some(vec![40u8]));
+
+    s.checkpoint().unwrap();
+    let reclaimed_once = s.metrics.mvcc_versions_reclaimed_total;
+    assert!(
+        reclaimed_once > 0,
+        "superseded versions below the horizon must be reclaimed"
+    );
+    // the pinned snapshot is untouched (P4) and the current state is unchanged
+    assert_eq!(s.get(&user_key(1, 1), pinned).unwrap(), Some(vec![40u8]));
+    assert_eq!(state_digest(&mut s).unwrap(), before);
+    s.verify(VerifyMode::Full).unwrap();
+    assert_eq!(s.metrics.oldest_snapshot_seq, 40);
+
+    // releasing the snapshot moves the horizon forward: another checkpoint reclaims more
+    s.release_snapshot(pinned);
+    s.commit(batch(61, &[(user_key(1, 1), vec![61u8])], &[], true))
+        .unwrap();
+    s.checkpoint().unwrap();
+    assert!(
+        s.metrics.mvcc_versions_reclaimed_total > reclaimed_once,
+        "a released snapshot must let the horizon advance"
+    );
+    assert_eq!(s.metrics.oldest_snapshot_seq, 61);
+    let after = state_digest(&mut s).unwrap();
+    s.verify(VerifyMode::Full).unwrap();
+
+    // recovery reproduces the reclaimed state exactly
+    drop(s);
+    let mut s = Store::open(&dir, opts()).unwrap();
+    assert_eq!(state_digest(&mut s).unwrap(), after);
+    let snap = s.snapshot();
+    assert_eq!(s.get(&user_key(1, 1), snap).unwrap(), Some(vec![61u8]));
+    assert_eq!(s.get(&user_key(1, 2), snap).unwrap(), Some(vec![40u8]));
+    s.verify(VerifyMode::Full).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// SPEC-002 §105: after a checkpoint the journal keeps only the segment that holds
+/// `checkpoint_lsn` and everything after it; older segments are deleted and recovery still
+/// reproduces the same state. A prepared transaction pins the journal below its frame.
+#[test]
+fn checkpoint_reclaims_journal_segments_but_prepared_work_pins_them() {
+    let small = || StoreOptions {
+        segment_bytes: 16 * 1024,
+        ..opts()
+    };
+    let dir = temp_dir("kernel-journal-retention");
+    let count = |d: &std::path::Path| {
+        std::fs::read_dir(d.join("journal"))
+            .map(|it| it.count())
+            .unwrap_or(0)
+    };
+    let mut s = Store::create(&dir, small()).unwrap();
+    for i in 1..=120u64 {
+        s.commit(batch(i, &[(user_key(1, i), vec![i as u8; 200])], &[], true))
+            .unwrap();
+    }
+    let segments_before = count(&dir);
+    assert!(segments_before > 1, "the workload must roll segments");
+    let digest = state_digest(&mut s).unwrap();
+    s.checkpoint().unwrap();
+    let segments_after = count(&dir);
+    assert!(
+        segments_after < segments_before,
+        "a checkpoint must reclaim journal segments ({segments_before} → {segments_after})"
+    );
+    assert!(s.metrics.journal_segments_reclaimed_total > 0);
+    assert!(s.metrics.journal_bytes_reclaimed_total > 0);
+    assert!(s.metrics.journal_retained_bytes > 0);
+    assert!(s.manifest().journal_segment > 1);
+    drop(s);
+    let mut s = Store::open(&dir, small()).unwrap();
+    assert_eq!(state_digest(&mut s).unwrap(), digest);
+    s.verify(VerifyMode::Full).unwrap();
+
+    // a prepared transaction pins the journal: its frame must survive every checkpoint
+    let _pinned_prepare = s
+        .prepare(prepare_batch(
+            500,
+            &[(user_key(2, 1), b"prepared".to_vec())],
+        ))
+        .unwrap();
+    for i in 121..=240u64 {
+        s.commit(batch(i, &[(user_key(1, i), vec![i as u8; 200])], &[], true))
+            .unwrap();
+    }
+    s.checkpoint().unwrap();
+    let retained = s.manifest().journal_segment;
+    drop(s);
+    let mut s = Store::open(&dir, small()).unwrap();
+    assert_eq!(
+        s.in_doubt().len(),
+        1,
+        "the prepared transaction must still be recoverable after journal reclamation"
+    );
+    assert_eq!(s.manifest().journal_segment, retained);
+    // deciding it releases the pin; the next checkpoint may reclaim further
+    let token = s.in_doubt().into_iter().next().unwrap();
+    assert_eq!(token.txn_id, txn(500));
+    s.commit_prepared(
+        token,
+        CommitDecision {
+            decision_ref: decision_ref(500),
+        },
+    )
+    .unwrap();
+    s.checkpoint().unwrap();
+    let digest = state_digest(&mut s).unwrap();
+    drop(s);
+    let mut s = Store::open(&dir, small()).unwrap();
+    assert_eq!(state_digest(&mut s).unwrap(), digest);
+    let snap = s.snapshot();
+    assert_eq!(
+        s.get(&user_key(2, 1), snap).unwrap(),
+        Some(b"prepared".to_vec())
+    );
+    s.verify(VerifyMode::Full).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }

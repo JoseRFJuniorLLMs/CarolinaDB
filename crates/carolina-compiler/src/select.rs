@@ -667,6 +667,47 @@ pub fn check_artifacts(
             "certificate manifests do not match the checker's rule/library manifests",
         ));
     }
+    // Evidence manifest (SPEC-004 §13, S004-A12): every Disproven judgment carries the
+    // counterexample bytes whose digest the manifest lists, and the manifest lists nothing else.
+    // Forged bytes, a dropped entry or a dangling entry all fail the check.
+    let mut expected: Vec<(String, Hash256)> = Vec::new();
+    for j in &certificate.judgments {
+        if let ProofStatus::Disproven { counterexample, .. } = &j.status {
+            if counterexample.is_empty() {
+                return Err(CoreError::new(
+                    ErrorCode::InvalidEvidence,
+                    format!(
+                        "Disproven judgment {} carries no counterexample",
+                        j.obligation_id
+                    ),
+                ));
+            }
+            expected.push((
+                format!("counterexample:{}", j.obligation_id),
+                sha256(counterexample),
+            ));
+        }
+    }
+    for e in &expected {
+        if !certificate.evidence_manifest.contains(e) {
+            return Err(CoreError::new(
+                ErrorCode::InvalidEvidence,
+                format!(
+                    "evidence manifest does not match the counterexample bytes of {}",
+                    e.0
+                ),
+            ));
+        }
+    }
+    for e in &certificate.evidence_manifest {
+        if !expected.contains(e) {
+            return Err(CoreError::new(
+                ErrorCode::InvalidEvidence,
+                format!("dangling evidence manifest entry {}", e.0),
+            ));
+        }
+    }
+    report.evidence_checked = expected.len();
     report.certificate_hash = certificate.certificate_hash();
     Ok(report)
 }
@@ -675,5 +716,7 @@ pub fn check_artifacts(
 pub struct CheckReport {
     pub structurally_valid: usize,
     pub obligations_checked: usize,
+    /// Disproven judgments whose counterexample bytes matched the evidence manifest.
+    pub evidence_checked: usize,
     pub certificate_hash: CertificateHash,
 }

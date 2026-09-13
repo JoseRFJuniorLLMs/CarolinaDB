@@ -222,6 +222,8 @@ impl Connections {
     }
 }
 
+/// Frame kinds a negotiated endpoint role may send (SPEC-013 is not implemented: the role is a
+/// declaration, so this gate is a structural constraint, not authentication).
 fn role_allows(role: EndpointRole, kind: MessageKind) -> bool {
     match kind {
         MessageKind::Consensus => role == EndpointRole::Node,
@@ -356,6 +358,60 @@ pub fn peer_link(addr: SocketAddr, caps: LocalCapabilities, rx: Receiver<Envelop
                 }
                 Err(_) => return,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SPEC-008 §18 / SPEC-013 (unimplemented): frame kinds are bound to the negotiated endpoint
+    /// role, so a client-role connection can never carry consensus or admin traffic. The role is a
+    /// declaration under `DEV_LOCAL`; this gate is structural, not authentication.
+    #[test]
+    fn frame_kinds_are_bound_to_the_endpoint_role() {
+        use EndpointRole::{Admin, Client, Node};
+        for (role, kind, allowed) in [
+            (Client, MessageKind::Invoke, true),
+            (Client, MessageKind::ResolveRequest, true),
+            (Client, MessageKind::Consensus, false),
+            (Client, MessageKind::Admin, false),
+            (Node, MessageKind::Consensus, true),
+            (Node, MessageKind::Invoke, false),
+            (Node, MessageKind::Admin, false),
+            (Admin, MessageKind::Admin, true),
+            (Admin, MessageKind::Invoke, true),
+            (Admin, MessageKind::Consensus, false),
+        ] {
+            assert_eq!(
+                role_allows(role, kind),
+                allowed,
+                "role {role:?} kind {kind:?}"
+            );
+        }
+        // reply kinds are never accepted as inbound traffic from any role
+        for role in [Client, Node, Admin] {
+            for kind in [
+                MessageKind::AdminReply,
+                MessageKind::Reply,
+                MessageKind::Hello,
+                MessageKind::HelloAck,
+            ] {
+                assert!(!role_allows(role, kind), "role {role:?} kind {kind:?}");
+            }
+        }
+    }
+
+    /// `DEV_LOCAL` is loopback-only on both ends (SECURITY.md).
+    #[test]
+    fn require_loopback_refuses_public_addresses() {
+        for addr in ["127.0.0.1:1", "[::1]:1"] {
+            require_loopback(addr.parse().unwrap()).unwrap();
+        }
+        for addr in ["10.0.0.1:1", "0.0.0.0:1", "[2001:db8::1]:1"] {
+            let err = require_loopback(addr.parse().unwrap()).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidManifest, "{addr}");
         }
     }
 }

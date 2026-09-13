@@ -26,8 +26,8 @@ mod tests {
     use carolina_core::error::ErrorCode;
     use carolina_core::ids::ConsistencyClass;
     use carolina_lang::fixtures::load_fixture;
-    use library::{T_C0_LOCAL, T_C1_COMMUTATIVE, T_C2_CAUSAL};
-    use plan::{ObligationKind, ProofStatus};
+    use library::{T_C0_LOCAL, T_C1_COMMUTATIVE, T_C2_CAUSAL, T_C3_ESCROW, T_C4_CERTIFIED};
+    use plan::{ObligationKind, ProofStatus, UnknownReason};
 
     fn compile_fixture(name: &str) -> CompileOutput {
         let (ir, _) = load_fixture(name).unwrap();
@@ -380,6 +380,248 @@ OPERATION mark(id: Uuid) VERSION 1 {
             text.contains("not qualified before MVP-6"),
             "C3 must be reported as unqualified: {text}"
         );
+    }
+
+    /// SPEC-004 §3 (CompilePolicy): `force_serial` keeps an operation's closure on C5 and is part
+    /// of the certificate's input hashes; no policy can admit a candidate with a failed obligation.
+    #[test]
+    fn policy_force_serial_keeps_c5_but_cannot_override_failed_obligations() {
+        let (ir, _) = load_fixture("inventory_sell").unwrap();
+        let mut input = CompileInput::local(ir.clone());
+        let baseline = compile(&input).unwrap();
+        let family = |o: &CompileOutput| {
+            o.plans
+                .iter()
+                .find(|p| p.operation_name == "sell")
+                .unwrap()
+                .profile
+                .family
+        };
+        assert_eq!(family(&baseline), ConsistencyClass::C0Local);
+        input.policy.force_serial = vec!["sell".into()];
+        let forced = compile(&input).unwrap();
+        assert_eq!(family(&forced), ConsistencyClass::C5Serial);
+        assert!(forced
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("force_serial")));
+        assert_ne!(
+            forced.certificate.input_hashes.policy_hash,
+            baseline.certificate.input_hashes.policy_hash
+        );
+        // the failed C1/C2 obligations stay failed under either policy: no C1/C2 candidate is
+        // ever accepted, and the baseline certificate records their rejection
+        for t in [T_C1_COMMUTATIVE, T_C2_CAUSAL] {
+            assert!(
+                baseline
+                    .certificate
+                    .rejected_candidates
+                    .iter()
+                    .any(|r| r.template_id == t && r.operation_name == "sell@1"),
+                "rejections: {:?}",
+                baseline
+                    .certificate
+                    .rejected_candidates
+                    .iter()
+                    .map(|r| (
+                        r.operation_name.clone(),
+                        r.template_id,
+                        r.template_name.clone()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            for out in [&baseline, &forced] {
+                assert!(out
+                    .candidates
+                    .iter()
+                    .filter(|c| c.template.id == t)
+                    .all(|c| !c.accepted()));
+                assert!(out.plans.iter().all(|p| p.template_id != t));
+            }
+        }
+    }
+
+    /// SPEC-004 §4/§5, S004-A08: an exhausted deterministic budget yields
+    /// `Unknown(BudgetExceeded)` — never Proven, never Disproven — and the closure still compiles
+    /// on the fully validated C0/C5 path with no counterexample evidence claimed.
+    #[test]
+    fn budget_exhaustion_yields_unknown_never_proven() {
+        let (ir, _) = load_fixture("inventory_sell").unwrap();
+        let mut input = CompileInput::local(ir.clone());
+        input.analysis_budget.max_steps = 1;
+        let out = compile(&input).unwrap();
+        for t in [T_C1_COMMUTATIVE, T_C2_CAUSAL] {
+            match status_of(&out, &ir, "sell", t, ObligationKind::IrConc) {
+                ProofStatus::Unknown(UnknownReason::BudgetExceeded) => {}
+                other => panic!("expected BudgetExceeded for {t:?}, got {other:?}"),
+            }
+        }
+        assert!(out.plans.iter().all(|p| matches!(
+            p.profile.family,
+            ConsistencyClass::C0Local | ConsistencyClass::C5Serial
+        )));
+        assert!(
+            out.certificate.evidence_manifest.is_empty(),
+            "no counterexample may be claimed under an exhausted budget"
+        );
+        assert_ne!(
+            out.certificate.input_hashes.budget_hash,
+            compile(&CompileInput::local(ir))
+                .unwrap()
+                .certificate
+                .input_hashes
+                .budget_hash
+        );
+    }
+
+    /// SPEC-004 §9 (and §8): C4 and C3 are unqualified runtime capabilities; their candidates are
+    /// rejected with `MissingRuntimeCapability` and never become a placeholder success.
+    #[test]
+    fn unqualified_c3_and_c4_templates_are_rejected_as_missing_runtime_capability() {
+        let (ir, _) = load_fixture("inventory_sell").unwrap();
+        let out = compile(&CompileInput::local(ir.clone())).unwrap();
+        for t in [T_C3_ESCROW, T_C4_CERTIFIED] {
+            match status_of(&out, &ir, "sell", t, ObligationKind::RuntimeCapability) {
+                ProofStatus::Unknown(UnknownReason::MissingRuntimeCapability(_)) => {}
+                other => panic!("expected MissingRuntimeCapability for {t:?}, got {other:?}"),
+            }
+            assert!(out
+                .certificate
+                .rejected_candidates
+                .iter()
+                .any(|r| r.template_id == t));
+        }
+        assert!(out.plans.iter().all(|p| !matches!(
+            p.profile.family,
+            ConsistencyClass::C3Escrow | ConsistencyClass::C4Certified
+        )));
+    }
+
+    /// SPEC-004 §7 / S004-A15: a cross-group (composite) session scope has no qualified composite
+    /// plan; compilation reports `UnsupportedSessionScope` instead of widening or relabeling.
+    #[test]
+    fn composite_session_scope_is_refused_as_unsupported() {
+        let src = carolina_lang::fixtures::fixture_source("causal_ship")
+            .unwrap()
+            .replace(
+                "session_scope: ReplicationGroup(\"orders\")",
+                "session_scope: CompositeScope(Order, PaymentConfirmed)",
+            );
+        let ast = carolina_lang::parser::parse_module(&src, &carolina_core::limits::Limits::v1())
+            .unwrap();
+        let (ir, _) = carolina_lang::lower::lower_module(&ast, None).unwrap();
+        assert!(ir.operations.iter().any(|o| matches!(
+            o.contract.session_scope,
+            carolina_lang::ir::SessionScope::CompositeScope(_)
+        )));
+        let err = match compile(&CompileInput::local(ir)) {
+            Err(e) => e,
+            Ok(out) => panic!(
+                "composite scope must not compile; got plans {:?}",
+                out.plans
+                    .iter()
+                    .map(|p| &p.operation_name)
+                    .collect::<Vec<_>>()
+            ),
+        };
+        assert_eq!(err.code, ErrorCode::UnsupportedSessionScope);
+    }
+
+    /// S004-A12: forged, dropped or dangling counterexample evidence fails checking.
+    #[test]
+    fn checker_rejects_forged_or_missing_counterexample_evidence() {
+        let out = compile_fixture("inventory_sell");
+        let rules = rules::AnalysisRuleManifest::v1();
+        let lib = library::ProtocolLibraryManifest::v1();
+        let ok = check_artifacts(&out.plans, &out.certificate, &rules, &lib).unwrap();
+        assert!(ok.evidence_checked > 0);
+        // forged counterexample bytes
+        let mut cert = out.certificate.clone();
+        let j = cert
+            .judgments
+            .iter_mut()
+            .find(|j| matches!(j.status, ProofStatus::Disproven { .. }))
+            .unwrap();
+        if let ProofStatus::Disproven { counterexample, .. } = &mut j.status {
+            counterexample.push(b' ');
+        }
+        assert_eq!(
+            check_artifacts(&out.plans, &cert, &rules, &lib)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidEvidence
+        );
+        // dropped manifest entry
+        let mut cert = out.certificate.clone();
+        cert.evidence_manifest.pop();
+        assert_eq!(
+            check_artifacts(&out.plans, &cert, &rules, &lib)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidEvidence
+        );
+        // dangling manifest entry
+        let mut cert = out.certificate.clone();
+        cert.evidence_manifest.push((
+            "counterexample:forged".into(),
+            carolina_core::hash::sha256(b"forged"),
+        ));
+        assert_eq!(
+            check_artifacts(&out.plans, &cert, &rules, &lib)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidEvidence
+        );
+    }
+
+    /// SPEC-004 §19 / S004-A08: when even the conservative C5 baseline cannot discharge its
+    /// obligations, compilation fails with `NoSafePlan` instead of emitting a plan.
+    #[test]
+    fn no_safe_plan_when_no_ordered_authority_covers_the_scope() {
+        use carolina_core::ids::{AuthorityId, NodeId, PlacementEpoch, SemanticScopeId};
+        use input::{
+            AuthorityDomain, AuthorityKind, FailureDomainPolicy, NodeCapability, Placement,
+        };
+        let (ir, _) = load_fixture("inventory_sell").unwrap();
+        let node = NodeId::derive("escrow-only-node");
+        let mut input = CompileInput::local(ir);
+        input.topology = TopologySnapshot {
+            placements: vec![Placement {
+                scope: SemanticScopeId::derive("escrow-only-scope"),
+                placement_epoch: PlacementEpoch(1),
+                nodes: vec![node],
+            }],
+            // Only an unqualified escrow holder: no ordered serial and no exclusive local writer,
+            // so no candidate — not even C5 — can prove AUTHORITY over the scope.
+            authority_domains: vec![AuthorityDomain {
+                id: AuthorityId::derive("escrow-only"),
+                name: "escrow-only".into(),
+                kind: AuthorityKind::EscrowHolder,
+                covered_records: vec![],
+                admitted_nodes: vec![node],
+            }],
+            durability_policies: vec![FailureDomainPolicy {
+                name: "local".into(),
+                required_durable_copies: 1,
+                failure_domains: 1,
+            }],
+            node_capabilities: vec![NodeCapability {
+                node_id: node,
+                families: vec![ConsistencyClass::C5Serial],
+                wire_versions: vec!["1.0".into()],
+            }],
+        };
+        let err = match compile(&input) {
+            Err(e) => e,
+            Ok(out) => panic!(
+                "expected NoSafePlan, got {:?}",
+                out.plans
+                    .iter()
+                    .map(|p| (p.operation_name.clone(), p.profile.family))
+                    .collect::<Vec<_>>()
+            ),
+        };
+        assert_eq!(err.code, ErrorCode::NoSafePlan, "{err}");
     }
 
     /// S004-A08-like: reserve/release compiles; every operation is C0/C5 in the local profile.

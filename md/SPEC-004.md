@@ -1,6 +1,7 @@
 # SPEC-004 — Coordination Compiler
 
 **Status:** Draft 0.2 — proposed implementation contract; rule soundness and runtime qualification pending
+**Implementation status (2026-09-12):** CC0 and the C0/C5 part of CC1 implemented and tested in `crates/carolina-compiler`: typed inputs, fixed-point closure and directed interactions, 11 obligations with Proven/Disproven(replayable)/Unknown, deterministic selection and policy, canonical plan/certificate, artifact checker (obligations, manifests, evidence-manifest digests), EXPLAIN, `carolina compile/check/plan/graph invariants`. Missing: C3 escrow synthesis (§8), C4 certification (§9), composite multi-IDC atomicity (§11.1), structured MigrationRequirements (§14), the refinement relation (§3), higher-arity/exclusion/drain edges (§6), golden EXPLAIN fixtures (A13), mixed-family simulation (A14). Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md)
 **Execution targets:** [SPEC-005](SPEC-005.md), [SPEC-006](SPEC-006.md), [SPEC-007](SPEC-007.md), [SPEC-008](SPEC-008.md)

@@ -397,7 +397,10 @@ impl Parser {
             };
             let group_by = if self.eat_kw("GROUP") {
                 self.kw("BY")?;
-                Some(self.expr()?)
+                // the group key stops below the comparison level: `GROUP BY m.team <= 10` must
+                // read the key as `m.team` and leave `<= 10` to the invariant's bound, otherwise
+                // the key swallows the bound and the aggregate cannot be written at all
+                Some(self.add_expr()?)
             } else {
                 None
             };

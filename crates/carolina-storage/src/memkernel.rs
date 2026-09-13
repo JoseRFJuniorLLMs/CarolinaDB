@@ -141,10 +141,12 @@ impl MemKernel {
             match pm {
                 ProtocolMutation::PutRecord(w) => {
                     let lk = w.key.logical_key().0;
-                    let rev = match self.records.get(&lk) {
-                        Some((r, ex, _)) if *ex == w.next => *r,
-                        Some((r, _, _)) => RecordRevision(r.0 + 1),
-                        None => RecordRevision(1),
+                    let rev = match w.expected {
+                        ExpectedRecordRevision::Absent => match self.records.get(&lk) {
+                            Some((r, ex, _)) if *ex == w.next => *r,
+                            _ => RecordRevision(1),
+                        },
+                        ExpectedRecordRevision::Exact(r) => RecordRevision(r.0 + 1),
                     };
                     self.records.insert(lk, (rev, w.next.clone(), false));
                 }

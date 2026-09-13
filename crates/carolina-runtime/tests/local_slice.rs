@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use carolina_core::canon::Canonical;
+use carolina_core::error::ErrorCode;
 use carolina_core::ids::*;
 use carolina_lang::fixtures::fixture_source;
 use carolina_lang::types::Value;
@@ -468,4 +469,51 @@ fn many_requests_survive_checkpoint_and_reopen_with_identical_receipts() {
     }
     assert_eq!(item(&mut e), (880, 120, 1000));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// SPEC-014 §3 (MVP-2 exit evidence: "local RequestHome with an explicitly local grant, no mocked
+/// distributed durability"): the grant is durable state, not a constructor argument. Opening a
+/// directory without one, or under a different home/cluster identity, is refused with
+/// `AuthorityUnavailable` before any request can bind.
+#[test]
+fn opening_without_a_matching_local_grant_is_refused() {
+    let dir = temp_dir("rt-grant");
+    let catalog = catalog();
+    let base = opts(Arc::new(NoFaults));
+    {
+        // create writes the grant, then the home; nothing else
+        let _ = LocalEngine::create(&dir, catalog.clone(), base.clone()).unwrap();
+    }
+    // same identity: opens
+    LocalEngine::open(&dir, catalog.clone(), base.clone()).unwrap();
+    // another home: the stored grant does not authorize it
+    let other_home = EngineOptions {
+        home_id: RequestHomeId::derive("another-home"),
+        ..base.clone()
+    };
+    let err = LocalEngine::open(&dir, catalog.clone(), other_home)
+        .err()
+        .expect("a foreign home must not open this directory");
+    assert_eq!(err.code, ErrorCode::AuthorityUnavailable, "{err}");
+    // another cluster under the same home id: also refused
+    let other_cluster = EngineOptions {
+        cluster_id: ClusterId::derive("another-cluster"),
+        ..base.clone()
+    };
+    let err = LocalEngine::open(&dir, catalog.clone(), other_cluster)
+        .err()
+        .expect("a foreign cluster must not open this directory");
+    assert_eq!(err.code, ErrorCode::AuthorityUnavailable, "{err}");
+
+    // a bare storage directory has no grant at all: no engine may open it
+    let bare = temp_dir("rt-grant-bare");
+    {
+        let _ = carolina_storage::Store::create(&bare, base.store.clone()).unwrap();
+    }
+    let err = LocalEngine::open(&bare, catalog, base)
+        .err()
+        .expect("a directory without a grant must not open");
+    assert_eq!(err.code, ErrorCode::AuthorityUnavailable, "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&bare);
 }

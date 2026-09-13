@@ -215,7 +215,7 @@ impl TreeHarness {
 fn key_of(rng: &mut DetRng, space: u64) -> Vec<u8> {
     let k = rng.below(space);
     let mut v = format!("k{k:06}").into_bytes();
-    if k % 7 == 0 {
+    if k.is_multiple_of(7) {
         v.extend(std::iter::repeat_n(b'x', 40));
     }
     v
@@ -255,7 +255,7 @@ pub fn btree_differential(
             "seed {seed}: duplicate (key, seq) must be idempotent"
         );
         model.entry(key.clone()).or_default().push((seq, value));
-        if i % 97 == 0 {
+        if i.is_multiple_of(97) {
             for _ in 0..5 {
                 let k = key_of(&mut rng, space);
                 let vis = rng.below(seq + 1);
@@ -266,7 +266,7 @@ pub fn btree_differential(
                 );
             }
         }
-        if i % 503 == 0 {
+        if i.is_multiple_of(503) {
             let vis = rng.below(seq + 1);
             let start = key_of(&mut rng, space);
             let end = key_of(&mut rng, space);
@@ -747,10 +747,48 @@ pub fn io_error_never_yields_success() -> Result<(), String> {
         Err(e) => e,
     };
     ensure!(err.code == ErrorCode::Io, "expected Io, got {:?}", err.code);
+    // After a failed durable write the store fails closed (SPEC-002 §111-§114): every further
+    // access through the same handle is refused with NotReady until it is reopened and recovered.
+    let snap = s.snapshot();
+    match s.get(&user_key(1, 2), snap) {
+        Err(e) => ensure!(
+            e.code == ErrorCode::NotReady,
+            "after a failed durable write reads must be refused with NotReady, got {:?}",
+            e.code
+        ),
+        Ok(v) => ensure!(v.is_none(), "failed commit must stay invisible"),
+    }
+    ensure!(
+        s.commit(batch(3, &[(user_key(1, 3), vec![3])], &[], true))
+            .is_err(),
+        "a store that failed a durable write must not accept another commit"
+    );
+    drop(s);
+    // Reopening recovers: the acknowledged commit is there, the failed one never becomes visible.
+    let mut s = e2s(
+        Store::open(
+            &dir,
+            StoreOptions {
+                durability: DurabilityMode::Sync,
+                faults: Arc::new(NoFaults),
+                pool_frames: 32,
+                ..Default::default()
+            },
+        ),
+        "reopen after io error",
+    )?;
+    e2s(s.verify(VerifyMode::Full), "verify after reopen")?;
     let snap = s.snapshot();
     ensure!(
-        e2s(s.get(&user_key(1, 2), snap), "get")?.is_none(),
-        "failed commit must stay invisible"
+        e2s(s.get(&user_key(1, 1), snap), "get")? == Some(vec![1]),
+        "the acknowledged commit must survive"
+    );
+    // key (1,2) is the failed commit: its frame may or may not have reached the disk, so its
+    // durable outcome is genuinely unknown and recovery may replay it. What must never happen is
+    // that it was reported as a success, or that work refused by the fail-closed store appears.
+    ensure!(
+        e2s(s.get(&user_key(1, 3), snap), "get")?.is_none(),
+        "a commit refused by a failed-closed store must never become visible"
     );
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
@@ -838,14 +876,14 @@ pub fn kernel_differential(seed: u64, ops: u64) -> Result<CampaignStats, String>
                 puts.push((k, rng.bytes(n)));
             }
         }
-        let b = batch(i, &puts, &dels, i % 3 == 0);
+        let b = batch(i, &puts, &dels, i.is_multiple_of(3));
         let rs = e2s(s.commit(b.clone()), "store commit")?;
         let rm = e2s(m.commit(b), "mem commit")?;
         ensure!(
             rs.local_version.seq == rm.local_version.seq,
             "seq differs at op {i}"
         );
-        if i % 50 == 0 {
+        if i.is_multiple_of(50) {
             ensure!(
                 e2s(state_digest(&mut s), "digest")? == m.digest(),
                 "digest differs at op {i}"

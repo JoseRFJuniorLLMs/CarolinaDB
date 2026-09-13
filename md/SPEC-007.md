@@ -2,6 +2,7 @@
 
 **Subtitle:** Optimistic Execution, Predicate Validation and Durable Reservations
 **Status:** Draft 0.2 — proposed implementation contract; not an implemented or proven protocol
+**Implementation status (2026-09-12):** Not implemented (optional SPEC-014 MVP-8; gate Q6-CERTIFICATION NOT_RUN, Q-C09 NOT_APPLICABLE). Only fail-closed placeholders exist: the unqualified C4_CERTIFIED_V1 template (rejected with MissingRuntimeCapability), plan-codec variants that are never constructed and a handshake that refuses a C4 capability; no certifier, read tokens, reservations, SnapshotCut, C4 error codes, metrics or C4-0xx campaign. Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Type:** Distributed runtime specification
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md)

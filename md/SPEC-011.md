@@ -1,6 +1,7 @@
 # SPEC-011 — Catalog, Control Plane & Authority Registry
 
 **Status:** Draft 0.1; implementation and qualification remain open.
+**Implementation status (2026-09-12):** Catalog state machine implemented and tested over a fixed three-voter Raft log (`crates/carolina-catalog`, `carolina-node`): typed keys and taxonomy (§2), CAS with revisions/digests and one generation per command (§3), idempotent AdminRequestId/IdentityConflict, phantom-safe scope locks, grant lifecycle STAGED→ACTIVE→CLOSING→CLOSED→RETIRED, request routes, tombstones, pinned genesis, leader read barrier; QI-CATALOG PASS (CAT-01/02/05/12/15/16 + closed-never-reopens). Missing: artifact registry and plan lifecycle (§6), capability matrix, node enrollment, durability policies, closure/installation evidence and activation CAS (§7), migration records/worker claims (model only), watches, PINNED_OFFLINE, catalog snapshots/compaction/GC (§9), most §10 error codes, inspection/metrics; CAT-03/07/09/11/13/14 have no campaign. Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Depends on:** [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md), [SPEC-009](SPEC-009.md).
 **Companion contracts:** [SPEC-012](SPEC-012.md) owns request identity and codecs; [SPEC-013](SPEC-013.md) owns authentication and trust.

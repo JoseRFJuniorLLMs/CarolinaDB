@@ -357,9 +357,15 @@ fn empty_campaigns_and_zero_exercise_budgets_are_rejected_before_io() {
         cases.push(cfg);
     }
     for cfg in cases {
-        assert!(matches!(run_campaign(&cfg), Err(ConfigError::InvalidBudget(_))));
+        assert!(matches!(
+            run_campaign(&cfg),
+            Err(ConfigError::InvalidBudget(_))
+        ));
     }
-    assert!(!tr.exists(), "invalid campaigns must not create a scratch directory");
+    assert!(
+        !tr.exists(),
+        "invalid campaigns must not create a scratch directory"
+    );
 }
 
 #[test]

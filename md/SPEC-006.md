@@ -2,6 +2,7 @@
 
 **Subtitle:** Bounded Resources, Exclusive Rights, Transfers and Recovery
 **Status:** Draft 0.2 — proposed protocol; proof and implementation are pending
+**Implementation status (2026-09-12):** Not implemented at runtime (SPEC-014 MVP-6; gate Q3 NOT_RUN for C3). Present: the typed escrow identities (§4), ESCROW namespace and record-kind registrations (names only), the FM-1 explicit-state model with negative controls (bounded; TLC not run) and business-level reserve/release/consume/supply on the local C0/C5 profile (partial ESC-002/009/016/018/019/023/024). No rights ledger U/H/X, holders/fences, transfer protocol, durability policies, recovery states, quarantine, observability, ESC campaign or gates E0–E4. Table: [docs/AUDIT.md](../docs/AUDIT.md).
 **Date:** 2026-09-09
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md), [SPEC-005](SPEC-005.md)
 **Integrates with:** [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)

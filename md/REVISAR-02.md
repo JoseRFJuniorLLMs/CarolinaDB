@@ -4,6 +4,7 @@
 **Repositório:** `JoseRFJuniorLLMs/CarolinaDB`  
 **Data da auditoria:** 2026-09-09  
 **Status:** correções arquiteturais pendentes antes do início da implementação distribuída  
+**Atualização 2026-09-12:** as caixas abaixo foram reavaliadas contra a árvore de código (auditoria por requisito em [docs/AUDIT.md](../docs/AUDIT.md); evidência de testes em [docs/STATUS.md](../docs/STATUS.md)). Uma caixa marcada `[x]` tem código *e* teste/lint na árvore; uma nota *parcial* explica o que falta. As secções não anotadas (P2, §7, §17, §18, §20) continuam por fazer.  
 **Objetivo:** eliminar contradições normativas entre SPECs, congelar os contratos transversais e criar uma sequência de implementação segura para agentes de IA e desenvolvedores humanos.
 
 ---
@@ -40,26 +41,26 @@ Além disso, há trabalho de limpeza transversal: nomenclatura `AstraDB`/`Caroli
 
 ## P0 — bloqueia implementação distribuída
 
-- [ ] Reescrever `SPEC-009` para a taxonomia normativa da `SPEC-011`.
-- [ ] Eliminar `IdcEpoch` de registros novos/persistentes/wire.
-- [ ] Eliminar schemas duplicados de `FinalReceipt`.
-- [ ] Alinhar migration records aos tipos `IdcBinding`, `IdcGeneration`, `IdcAuthorityEpoch`, `HolderAuthorityEpoch`, `RequestHomeEpoch`, etc.
-- [ ] Atualizar `SPEC-010` para depender também de `SPEC-011`, `SPEC-012`, `SPEC-013` e `SPEC-014`.
-- [ ] Criar os gates formais `FM-1`, `FM-2`, `FM-3`.
-- [ ] Criar `SPEC-014 — Implementation Profile & Vertical Slice`.
-- [ ] Garantir que nenhuma SPEC normativa use `authority_epoch: u64`, `idcs: Vec<(IdcId,u64)>` ou alias equivalente.
-- [ ] Garantir que todo request path use `RequestKey -> RequestHome -> BindIfAbsent -> TxnId`.
-- [ ] Garantir que nenhum runtime possa criar nova identidade quando o resultado anterior é `OutcomeUnknown`.
+- [x] Reescrever `SPEC-009` para a taxonomia normativa da `SPEC-011`. *(SPEC-009 Draft 0.2 usa `IdcBinding`/`AuthorityBinding`; `tools/spec_lint.py` PASS.)*
+- [x] Eliminar `IdcEpoch` de registros novos/persistentes/wire. *(lint check 1; `carolina-core/src/ids.rs` só define os tipos nominais.)*
+- [x] Eliminar schemas duplicados de `FinalReceipt`. *(lint check 2; único dono SPEC-012 §7, codec em `carolina-wire`.)*
+- [x] Alinhar migration records aos tipos `IdcBinding`, `IdcGeneration`, `IdcAuthorityEpoch`, `HolderAuthorityEpoch`, `RequestHomeEpoch`, etc. *(SPEC-009 §3; tipos com testes em `carolina-core/src/ids.rs`; os structs `MigrationRecord`/`CloseCertificate` ainda não existem em código — MVP-7.)*
+- [x] Atualizar `SPEC-010` para depender também de `SPEC-011`, `SPEC-012`, `SPEC-013` e `SPEC-014`. *(cabeçalho da SPEC-010 v0.2.)*
+- [x] Criar os gates formais `FM-1`, `FM-2`, `FM-3`. *(SPEC-010 §16; checkers explícitos em `crates/carolina-models` com controlos negativos, PASS dentro dos limites declarados; fontes TLA+ em `models/`, TLC não executado.)*
+- [x] Criar `SPEC-014 — Implementation Profile & Vertical Slice`. *(`md/SPEC-014.md`.)*
+- [x] Garantir que nenhuma SPEC normativa use `authority_epoch: u64`, `idcs: Vec<(IdcId,u64)>` ou alias equivalente. *(lint check 1, job `spec-lint` no CI.)*
+- [x] Garantir que todo request path use `RequestKey -> RequestHome -> BindIfAbsent -> TxnId`. *(`crates/carolina-runtime/src/home.rs` local e replicada; testes `tests/local_slice.rs`, campanha C5-021 em três processos.)*
+- [x] Garantir que nenhum runtime possa criar nova identidade quando o resultado anterior é `OutcomeUnknown`. *(`engine.rs` só resolve por `RequestKey`; regra Q-C05 do checker e controlo negativo QA-02 "unknown treated as abort".)*
 
 ## P1 — deve ser resolvido antes do primeiro release técnico
 
-- [ ] Normalizar nome do projeto: CarolinaDB x Astra.
-- [ ] Atualizar README.
-- [ ] Criar matriz de propriedade normativa por SPEC.
-- [ ] Criar lint/check automatizado para referências cruzadas e tipos proibidos.
-- [ ] Congelar os manifests de codec da `SPEC-012`.
-- [ ] Tornar qualification de security/control-plane/wire explícita.
-- [ ] Fixar nomes definitivos dos crates e CLI.
+- [x] Normalizar nome do projeto: CarolinaDB x Astra. *(lint check 6; `astra.*` mantido só como domínio de hash/protocolo.)*
+- [x] Atualizar README. *(secção Status reescrita em 2026-09-12.)*
+- [x] Criar matriz de propriedade normativa por SPEC. *(`md/SPEC-OWNERSHIP.md`, usada pelo lint.)*
+- [x] Criar lint/check automatizado para referências cruzadas e tipos proibidos. *(`tools/spec_lint.py`, 7 verificações, job de CI.)*
+- [ ] Congelar os manifests de codec da `SPEC-012`. *(parcial: `fixtures/codec` congela 52 vetores de 23 kinds habilitados com 208 negativos — `QI-CODEC-CORPUS` PASS; 17 kinds registados de funcionalidades desativadas não têm codec nem vetor; o `CodecManifest` campo-a-campo da SPEC-012 §12 não existe.)*
+- [x] Tornar qualification de security/control-plane/wire explícita. *(gates `QI-SECURITY` = NOT_RUN, `QI-CATALOG` = PASS, `QI-CODEC-CORPUS` = PASS em `carolina qualify`; a porta QI só abre com segurança implementada.)*
+- [x] Fixar nomes definitivos dos crates e CLI. *(`carolina-*`; binários `carolina` e `carolina-node`.)*
 
 ## P2 — pode ocorrer após o primeiro vertical slice
 
@@ -306,18 +307,18 @@ A mudança de `HolderAuthorityEpoch` não cria novos rights.
 
 ## 2.9 Critérios de aceite da SPEC-009 v0.2
 
-- [ ] Zero ocorrências normativas de `IdcEpoch`.
-- [ ] Zero `source_epoch: u64`.
-- [ ] Zero `idc_epochs[]`.
-- [ ] Zero schema duplicado de `FinalReceipt`.
-- [ ] Todo participant usa `IdcBinding`.
-- [ ] Toda authority usa `AuthorityBinding`.
-- [ ] Todo request histórico mantém `RequestKey/RequestHash/TxnId`.
-- [ ] Migration de C3 preserva `ResourceGeneration/EscrowEpoch/HolderAuthorityEpoch`.
-- [ ] Migration de session explicita single-group C2.
-- [ ] Todos os records são encodáveis pela `SPEC-012`.
-- [ ] Toda activation exige evidência registrada pela `SPEC-011`.
-- [ ] Toda autenticação/evidence segue `SPEC-013`.
+- [x] Zero ocorrências normativas de `IdcEpoch`. *(lint)*
+- [x] Zero `source_epoch: u64`. *(lint)*
+- [x] Zero `idc_epochs[]`. *(lint)*
+- [x] Zero schema duplicado de `FinalReceipt`. *(lint)*
+- [x] Todo participant usa `IdcBinding`. *(SPEC-009 §3/§5.)*
+- [x] Toda authority usa `AuthorityBinding`. *(SPEC-009 §3/§5.)*
+- [x] Todo request histórico mantém `RequestKey/RequestHash/TxnId`. *(SPEC-009 §9; no runtime só dentro de uma geração — a migração em si é MVP-7.)*
+- [x] Migration de C3 preserva `ResourceGeneration/EscrowEpoch/HolderAuthorityEpoch`. *(SPEC-009 §3; C3 não implementado.)*
+- [x] Migration de session explicita single-group C2. *(SPEC-009 §10.)*
+- [ ] Todos os records são encodáveis pela `SPEC-012`. *(`migration_record` e `close_certificate` só estão registados por nome; sem codec nem vetor.)*
+- [x] Toda activation exige evidência registrada pela `SPEC-011`. *(texto da SPEC-009 §7; a activação em runtime é MVP-7.)*
+- [x] Toda autenticação/evidence segue `SPEC-013`. *(texto; SPEC-013 não implementada.)*
 
 ---
 
@@ -517,19 +518,19 @@ C1/C2 -> ordered
 
 Adicionar testes obrigatórios:
 
-- [ ] linearizable catalog CAS;
-- [ ] duplicate `AdminRequestId`;
-- [ ] same ID + different command -> `IdentityConflict`;
-- [ ] overlapping migration locks;
-- [ ] stale follower absence cannot prove unlock;
-- [ ] leader failover retains command results;
-- [ ] compacted watches require fresh snapshot/barrier;
-- [ ] catalog unavailable + valid `PINNED_OFFLINE` grant;
-- [ ] policy update cannot revoke disconnected writer sem closure;
-- [ ] retired authority never returns ACTIVE;
-- [ ] capability removal cannot invalidate active grant silently;
-- [ ] stale node cannot self-authorize from cached catalog;
-- [ ] catalog restore does not fabricate semantic authority.
+- [x] linearizable catalog CAS; *(CAS com revisões/digests sobre o log Raft; testes de `carolina-catalog` e `QI-CATALOG`.)*
+- [x] duplicate `AdminRequestId`; *(CAT-02.)*
+- [x] same ID + different command -> `IdentityConflict`; *(catálogo; desde 2026-09-12 o node também responde `IdentityConflict` a um pedido admin cujo hash difere do comando comprometido.)*
+- [x] overlapping migration locks; *(CAT-01, predicado sem phantoms.)*
+- [ ] stale follower absence cannot prove unlock; *(CAT-06 sem teste; leituras só no líder após read barrier.)*
+- [x] leader failover retains command results; *(campanha de três processos: o novo líder retoma o bootstrap com ids admin idempotentes; CAT-02.)*
+- [ ] compacted watches require fresh snapshot/barrier; *(watches e compaction inexistentes; o log é reproduzido desde o índice 1.)*
+- [ ] catalog unavailable + valid `PINNED_OFFLINE` grant; *(não implementado.)*
+- [ ] policy update cannot revoke disconnected writer sem closure; *(CAT-04 só no modelo FM-3.)*
+- [x] retired authority never returns ACTIVE; *(closed-never-reopens e CAT-16 em `QI-CATALOG`.)*
+- [ ] capability removal cannot invalidate active grant silently; *(CAT-07; matriz de capacidades inexistente.)*
+- [x] stale node cannot self-authorize from cached catalog; *(C5-009: seguidor/minoria recusa mutações; a admissão é reverificada em ordem de log em cada voter.)*
+- [ ] catalog restore does not fabricate semantic authority. *(CAT-09; sem snapshot/restore de catálogo.)*
 
 ---
 
@@ -537,29 +538,29 @@ Adicionar testes obrigatórios:
 
 ## Request identity tests
 
-- [ ] same RequestKey + same content -> same TxnId;
-- [ ] same RequestKey + changed args -> `RequestIdentityMismatch`;
-- [ ] lost first response -> resolution by RequestKey;
-- [ ] crash after BindIfAbsent -> no duplicate allocation;
-- [ ] moving RequestHome preserves bindings;
-- [ ] old home cannot allocate after closure;
-- [ ] `OutcomeUnknown` never causes auto-new request;
-- [ ] `ResultExpired` never permits reexecution;
-- [ ] retired namespace never permits reuse.
+- [x] same RequestKey + same content -> same TxnId; *(`reserve_release_receipts_are_exact_and_idempotent`.)*
+- [x] same RequestKey + changed args -> `RequestIdentityMismatch`; *(`changed_content_under_one_key_is_an_identity_mismatch`; C5-010.)*
+- [x] lost first response -> resolution by RequestKey; *(`crash_after_commit_before_reply_resolves_to_the_identical_receipt`; C5-021.)*
+- [x] crash after BindIfAbsent -> no duplicate allocation; *(`crash_after_allocation_reexecutes_under_the_same_txn_id`.)*
+- [ ] moving RequestHome preserves bindings; *(parcial: o sucessor Raft continua a mesma home e o contador (C5-021); não há transferência de home entre autoridades — MVP-7.)*
+- [ ] old home cannot allocate after closure; *(não há closure de home; um seguidor/minoria recusa alocar, C5-009.)*
+- [x] `OutcomeUnknown` never causes auto-new request; *(engine + Q-C05/QA-02.)*
+- [x] `ResultExpired` never permits reexecution; *(`result_eviction_and_namespace_retirement_survive_restart`; Q-C13.)*
+- [x] retired namespace never permits reuse. *(mesmo teste; `IdentityExpired`.)*
 
 ## Wire tests
 
-- [ ] canonical reencoding byte-identical;
-- [ ] reject duplicate fields;
-- [ ] reject unknown mandatory semantics;
-- [ ] reject integer overflow;
-- [ ] reject noncanonical integer/hex forms;
-- [ ] reject oversized lengths before allocation;
-- [ ] golden vectors for every normative record;
-- [ ] cross-platform fixtures;
-- [ ] snapshot corruption;
-- [ ] unsupported codec negotiation;
-- [ ] downgrade attempt.
+- [x] canonical reencoding byte-identical; *(`Canonical::decode` re-projeta e compara; o corpus `QI-CODEC-CORPUS` exige ponto fixo.)*
+- [x] reject duplicate fields; *(`canon.rs` teste `roundtrip_and_reject_noncanonical`.)*
+- [x] reject unknown mandatory semantics; *(`registry.rs decode_checked` fail-closed; `unknown_fields_rejected`; 208 vetores negativos.)*
+- [x] reject integer overflow; *(inteiros como strings decimais com verificação de largura, teste `canonical_ints`.)*
+- [x] reject noncanonical integer/hex forms; *(`canonical_ints`, `roundtrip_and_reject_noncanonical`; `hex_decode` estrito.)*
+- [x] reject oversized lengths before allocation; *(`Limits` aplicados antes da alocação; teste `limits_enforced`.)*
+- [ ] golden vectors for every normative record; *(parcial: só os 23 kinds habilitados.)*
+- [ ] cross-platform fixtures; *(parcial: CI Linux+Windows configurado; o run público de `c98e984` falhou em `fmt --check` antes dos testes.)*
+- [ ] snapshot corruption; *(parcial: `manifest_validates_chunks`; não há export/import de snapshot.)*
+- [x] unsupported codec negotiation; *(`negotiation_downgrade_protection`.)*
+- [x] downgrade attempt. *(idem, incluindo cluster estrangeiro e DEV_LOCAL vs perfil de produção.)*
 
 ---
 
@@ -1179,15 +1180,15 @@ CompiledBatch {
 
 Checklist:
 
-- [ ] `RequestKey` sempre presente para business invocation.
-- [ ] internal protocol batches usam `ProtocolOnlyBatch`.
-- [ ] nenhuma fase interna inventa `StableRequestId`.
-- [ ] `terminal_outcome` não aparece em prepare.
-- [ ] composite transaction não cria receipt no participant local.
-- [ ] `semantic_digest` exclui evidência posterior que dependa dele.
-- [ ] `FinalReceiptV1` é byte-idêntico no retry.
-- [ ] CAS de `TxnStatusRecord` é obrigatório.
-- [ ] nenhuma atualização unchecked de protocol state.
+- [x] `RequestKey` sempre presente para business invocation. *(`CompiledBatch.request_key`; `verify()`.)*
+- [x] internal protocol batches usam `ProtocolOnlyBatch`. *(`home.rs`, `engine.rs`.)*
+- [x] nenhuma fase interna inventa `StableRequestId`. *(a identidade vem só do cliente/`make_invoke`.)*
+- [x] `terminal_outcome` não aparece em prepare. *(`kernel.rs prepare` / `batch.rs`.)*
+- [ ] composite transaction não cria receipt no participant local. *(MVP-4; transacções compostas inexistentes.)*
+- [x] `semantic_digest` exclui evidência posterior que dependa dele. *(`CompiledBatch::semantic_payload`.)*
+- [x] `FinalReceiptV1` é byte-idêntico no retry. *(testes locais e campanha C5-010.)*
+- [x] CAS de `TxnStatusRecord` é obrigatório. *(`ExpectedRecordRevision`; `protocol_cas_and_status_transitions`.)*
+- [x] nenhuma atualização unchecked de protocol state. *(idem; SPEC-002 §69 recusa commit duplicado de txn decidida.)*
 
 ---
 
