@@ -46,9 +46,24 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 python tools/test_spec_lint.py
 python tools/spec_lint.py
+python tools/run_tlc.py
+cargo audit --file Cargo.lock --no-fetch
 cargo build -p carolina-node --locked
 cargo run -p carolina-cli -- qualify --quick --out target/qualification
 ```
+
+`cargo audit --no-fetch` uses the locally available RustSec advisory database. CI runs
+`rustsec/audit-check` with an updated advisory database on every push and pull request.
+
+`tools/run_tlc.py` requires Java 17. It downloads TLA+ tools v1.8.0 only when absent,
+verifies the pinned SHA-256 digest, and checks FM-1, FM-2 and FM-3 with their bounded configs.
+
+## Coverage-guided fuzzing
+
+Four `cargo-fuzz` targets cover the DSL frontend, canonical compiler artifacts, wire/snapshot
+records and storage formats. Run them with nightly Rust as documented in
+[`fuzz/README.md`](../fuzz/README.md). The CI smoke job executes 256 inputs per target; release
+qualification uses longer retained campaigns.
 
 Omit `--quick` for the standard campaign budgets. `--keep-bundles` retains individual
 passing schedule histories as well as the campaign report. Inspect the actual

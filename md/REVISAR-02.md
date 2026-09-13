@@ -46,7 +46,7 @@ Além disso, há trabalho de limpeza transversal: nomenclatura `AstraDB`/`Caroli
 - [x] Eliminar schemas duplicados de `FinalReceipt`. *(lint check 2; único dono SPEC-012 §7, codec em `carolina-wire`.)*
 - [x] Alinhar migration records aos tipos `IdcBinding`, `IdcGeneration`, `IdcAuthorityEpoch`, `HolderAuthorityEpoch`, `RequestHomeEpoch`, etc. *(SPEC-009 §3; tipos com testes em `carolina-core/src/ids.rs`; os structs `MigrationRecord`/`CloseCertificate` ainda não existem em código — MVP-7.)*
 - [x] Atualizar `SPEC-010` para depender também de `SPEC-011`, `SPEC-012`, `SPEC-013` e `SPEC-014`. *(cabeçalho da SPEC-010 v0.2.)*
-- [x] Criar os gates formais `FM-1`, `FM-2`, `FM-3`. *(SPEC-010 §16; checkers explícitos em `crates/carolina-models` com controlos negativos, PASS dentro dos limites declarados; fontes TLA+ em `models/`, TLC não executado.)*
+- [x] Criar os gates formais `FM-1`, `FM-2`, `FM-3`. *(SPEC-010 §16; checkers explícitos em `crates/carolina-models` com controlos negativos, PASS dentro dos limites declarados; fontes TLA+ verificadas por TLC v1.8.0 com runner reproduzível.)*
 - [x] Criar `SPEC-014 — Implementation Profile & Vertical Slice`. *(`md/SPEC-014.md`.)*
 - [x] Garantir que nenhuma SPEC normativa use `authority_epoch: u64`, `idcs: Vec<(IdcId,u64)>` ou alias equivalente. *(lint check 1, job `spec-lint` no CI.)*
 - [x] Garantir que todo request path use `RequestKey -> RequestHome -> BindIfAbsent -> TxnId`. *(`crates/carolina-runtime/src/home.rs` local e replicada; testes `tests/local_slice.rs`, campanha C5-021 em três processos.)*

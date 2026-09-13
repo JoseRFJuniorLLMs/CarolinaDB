@@ -4,8 +4,8 @@
 //! sent may be delivered any number of times, in any order, or never), durable state that
 //! survives every crash, and explicit bounds. `explore` performs a breadth-first exhaustive search
 //! of the reachable states, checks the invariants in every state and returns the first violating
-//! trace. The TLA+ sources under `models/` state the same machines; they are documentation of the
-//! model until a TLC run is recorded (SPEC-010 §16 requires retaining tool, version and bounds).
+//! trace. The TLA+ sources under `models/` state the same machines and are checked separately by
+//! `tools/run_tlc.py`; `models/README.md` records the pinned tool, bounds and state counts.
 //!
 //! * [`fm1`] — Escrow transfer / authority / rights conservation
 //! * [`fm2`] — C5 decision authority, prepare/decision/install/publication/completion

@@ -30,14 +30,23 @@ Q6 stay `NOT_RUN` even when FM-1/2/3 pass.
 
 ## TLA+
 
-The `.tla` modules state the same machines and invariants for TLC. TLC has not been run in this
-repository (no Java/TLA+ toolchain recorded). When it is, record the TLC version, the `.cfg`, the
-number of states and the result next to the run; until then these files are documentation of the
-model and the Rust checker is the evidence.
+`python tools/run_tlc.py` downloads TLA+ tools v1.8.0 when absent, verifies its pinned SHA-256
+digest and model-checks all three modules with Java 17 and one worker. Terminal states are valid
+for these safety machines, so every `.cfg` explicitly sets `CHECK_DEADLOCK FALSE`; TLC still
+explores the complete bounded state graph and checks `Safety` in every reachable state.
 
-```text
-java -jar tla2tools.jar -config FM1_Escrow.cfg FM1_Escrow.tla
-```
+The recorded local run on 2026-09-13 completed without an error:
+
+| Model | Generated states | Distinct states | Graph depth |
+|---|---:|---:|---:|
+| FM-1 | 14,644 | 3,268 | 19 |
+| FM-2 | 1,049 | 348 | 21 |
+| FM-3 | 13,469 | 2,816 | 20 |
+
+Tool: TLA+ tools v1.8.0, TLC build `2026.09.12.025210` (`867aefb`); jar SHA-256
+`db131ddb48e7004d823bef4493df7b35694babe37505b9d9fa5685e7a331f1f1`. CI repeats the same
+checksum-verified run. These finite results remain bounded evidence rather than proof of the
+unbounded protocols or their Rust implementations.
 
 ## Refinement
 

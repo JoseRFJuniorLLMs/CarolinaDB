@@ -1,7 +1,7 @@
 --------------------------- MODULE FM2_Decision ---------------------------
 (* FM-2 — C5 decision authority, prepare / unique decision / install / publication /    *)
 (* completion (SPEC-008 §10, §11, §15). Same machine as crates/carolina-models/src/fm2.rs.*)
-(* The Rust checker is the executed artifact; a TLC run must be recorded separately.     *)
+(* Rust and bounded TLC checker evidence is recorded in models/README.md.                 *)
 
 EXTENDS Naturals
 

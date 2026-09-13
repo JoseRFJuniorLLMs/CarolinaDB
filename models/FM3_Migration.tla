@@ -1,7 +1,7 @@
 -------------------------- MODULE FM3_Migration --------------------------
 (* FM-3 — Migration, fencing and plan evolution (SPEC-009 §7–§8, SPEC-011 §4/§7).       *)
-(* Same machine as crates/carolina-models/src/fm3.rs; the Rust checker is the executed  *)
-(* artifact and a TLC run must be recorded separately.                                   *)
+(* Same machine as crates/carolina-models/src/fm3.rs; Rust and bounded TLC checker       *)
+(* evidence is recorded in models/README.md.                                              *)
 
 EXTENDS Naturals
 

@@ -210,15 +210,25 @@ impl Connections {
     }
 
     pub fn reply(&self, conn: ConnId, out: Outbound) {
-        if let Some(tx) = self.writers.lock().unwrap().get(&conn) {
+        let writers = self
+            .writers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(tx) = writers.get(&conn) {
             let _ = tx.send(out);
         }
     }
     fn register(&self, conn: ConnId, tx: Sender<Outbound>) {
-        self.writers.lock().unwrap().insert(conn, tx);
+        self.writers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(conn, tx);
     }
     fn remove(&self, conn: ConnId) {
-        self.writers.lock().unwrap().remove(&conn);
+        self.writers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&conn);
     }
 }
 
@@ -413,5 +423,26 @@ mod tests {
             let err = require_loopback(addr.parse().unwrap()).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidManifest, "{addr}");
         }
+    }
+
+    #[test]
+    fn poisoned_connection_registry_does_not_crash_the_node() {
+        let conns = Connections::default();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = conns.writers.lock().unwrap();
+            panic!("poison connection registry");
+        });
+
+        let receiver = conns.test_receiver(7);
+        conns.reply(
+            7,
+            Outbound {
+                kind: MessageKind::Reply,
+                stream_id: 3,
+                payload: b"ok".to_vec(),
+            },
+        );
+        assert_eq!(receiver.recv().unwrap().payload, b"ok");
+        conns.remove(7);
     }
 }

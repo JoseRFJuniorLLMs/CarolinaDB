@@ -993,7 +993,7 @@ pub fn run_campaign(cfg: &CampaignConfig) -> Result<CampaignReport, ConfigError>
             continue;
         }
         let scope = format!(
-            "explicit-state BFS (carolina-models {}), bounds: {}; TLA+ source in models/ not run by TLC",
+            "explicit-state BFS (carolina-models {}), bounds: {}; TLA+ source is checked separately by tools/run_tlc.py",
             env!("CARGO_PKG_VERSION"),
             ev.positive.bounds
         );

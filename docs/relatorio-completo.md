@@ -24,16 +24,19 @@ Validação local executada em Windows 11 com Rust 1.89.0, a MSRV fixada:
 |---|---|
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --workspace --all-targets --offline --target-dir target -- -D warnings` | PASS |
-| `cargo test --workspace --offline --target-dir target` | PASS — 179 testes; 0 falhas; 0 ignorados; repetido na MSRV 1.89.0 |
+| `cargo test --workspace --offline --target-dir target` | PASS — 181 testes; 0 falhas; 0 ignorados; repetido na MSRV 1.89.0 |
 | `python tools/test_spec_lint.py` | PASS — 2 testes |
 | `python tools/spec_lint.py` | PASS — 16 arquivos; 0 erros; 0 warnings |
 | `carolina qualify --quick` | PASS para todos os gates reivindicados |
+| `cargo audit --file Cargo.lock --no-fetch` | PASS — 25 dependências contra 1.216 advisories em cache; nenhum achado |
+| `cargo fuzz check` | PASS — quatro harnesses coverage-guided compilam; execução local bloqueada pelo linker do sanitizer no Windows e delegada ao CI Linux |
+| `python tools/run_tlc.py` | PASS — FM-1/2/3; 3.268/348/2.816 estados distintos; nenhuma violação |
 
 Bundle retido da campanha rápida:
 
 ```text
-target/qualification-msrv/local-quick/run-93efd675fc16422d-2
-manifest 5d17f45a2e0adc03c28d5c950be129f4e52a71833993ca673c7094c26d465283
+target/qualification-msrv/final/local-quick/run-34dfbaf40a573267
+manifest eefe377be0ff79d6f811f5f01028259d7ca3b2f51a01f616e3fc25ac31b519f3
 trace    85731071253a5f21f901242413e009cb0f36e9cdb5ab7f33b1c03426cdbad078
 ```
 
@@ -337,20 +340,13 @@ Também houve correção de parsing de aggregate bound com `GROUP BY`.
 
 ## O que falta
 
-### P1 — fuzzing real
+### P1 — campanhas longas de fuzzing
 
-O projeto chama parte dos testes de “fuzz”, mas o que existe é mutation testing determinístico.
-
-Ainda falta um harness coverage-guided real, por exemplo:
-
-- `cargo-fuzz`/libFuzzer;
-- corpus persistente;
-- fuzz de parser;
-- fuzz de canonical decoder;
-- fuzz de wire decoder;
-- fuzz de page/journal decoder;
-- fuzz de IR;
-- fuzz de snapshot chunks.
+Quatro harnesses `cargo-fuzz`/libFuzzer agora cobrem o frontend DSL, decodificadores
+canônicos/IR, wire/snapshot e formatos de storage. Todos compilam com nightly. A execução local
+no Windows não inicia porque o linker não fornece os símbolos de início/fim de
+sanitizer-coverage; o CI Linux executa 256 entradas por alvo. Ainda faltam corpus persistente,
+campanhas longas retidas e orçamento/digestos registrados para qualificação de release.
 
 ### P1 — cobertura mensurável
 
@@ -864,21 +860,12 @@ Criar `QI-AUTHZ` e fechar `QI-SECURITY`.
 
 ---
 
-# 15. Risco de panic por poison em transport
+# 15. Panic por poison em transport — corrigido
 
-O `Connections` registry usa:
-
-```rust
-self.writers.lock().unwrap()
-```
-
-Isso significa que um mutex poisoned pode transformar uma falha anterior em panic subsequente.
-
-Não é o maior risco do sistema, mas em código de daemon production profile o ideal é:
-
-- tratar poison explicitamente;
-- converter para erro controlado;
-- ou provar que o lock nunca cruza código que pode panic.
+O `Connections` registry deixou de usar `self.writers.lock().unwrap()`. Um mutex poisoned agora
+recupera o estado protegido com `PoisonError::into_inner`, evitando que uma falha anterior cause
+um segundo panic no daemon. A regressão envenena deliberadamente o registry e confirma que uma
+conexão ainda pode ser registrada, receber resposta e ser removida.
 
 A regra recomendada não é “zero unwrap em todo Rust”, e sim:
 
@@ -1054,9 +1041,10 @@ Isso é muito mais sério do que um conjunto casual de unit tests.
 
 Ainda não existe para o commit atual.
 
-### P1 — fuzz coverage-guided
+### P1 — fuzz coverage-guided de longa duração
 
-Mutation fuzz determinístico não substitui fuzzing real.
+Os quatro harnesses coverage-guided existem e compilam. Falta executar e reter campanhas longas;
+o smoke Linux do CI ainda não possui resultado público para esta árvore.
 
 ### P1 — workloads W2–W8
 
@@ -1075,9 +1063,11 @@ Faltam:
 - equivalence sheet;
 - comparable competitors/modes.
 
-### P1 — TLC
+### TLC bounded executado
 
-Há `.tla` e `.cfg`, mas TLC não foi registrado como executado.
+O runner `tools/run_tlc.py` fixa TLA+ tools v1.8.0 por SHA-256. Em 13/09/2026 os três
+modelos concluíram sem erro: FM-1 3.268 estados distintos, FM-2 348 e FM-3 2.816. Isso continua
+sendo evidência limitada pelos bounds:
 
 O projeto deve continuar dizendo:
 
@@ -1099,7 +1089,7 @@ Isso deve virar uma campanha reprodutível, não depender de uma sessão manual.
 
 `docs/STATUS.md` declara localmente, em 13/09:
 
-- 179 testes;
+- 181 testes;
 - 0 failed;
 - 0 ignored;
 - clippy clean;
@@ -1179,12 +1169,11 @@ Não é necessário adotar Prometheus especificamente, mas é necessário fornec
 
 O workspace possui poucas dependências externas, o que é excelente.
 
-Mesmo assim faltam no pipeline:
+O pipeline agora contém RustSec, e a auditoria local do lockfile não encontrou advisories.
+Continuam faltando:
 
-- `cargo audit`;
 - `cargo deny` ou equivalente;
 - policy de license allowlist;
-- advisory scanning;
 - dependency review;
 - provenance;
 - SBOM;
@@ -1476,9 +1465,9 @@ Antes de usar a expressão “production candidate”, exigir todos:
 
 - [ ] GitHub Actions verde no commit/tag.
 - [ ] Linux e Windows ou plataformas oficialmente suportadas.
-- [ ] MSRV coerente.
-- [ ] toolchain reproduzível.
-- [ ] zero formatter/clippy failures.
+- [x] MSRV coerente.
+- [x] toolchain reproduzível.
+- [x] zero formatter/clippy failures localmente.
 - [ ] qualification quick PASS no CI.
 - [ ] standard qualification PASS em release.
 - [ ] `QI-SECURITY PASS`.
@@ -1494,8 +1483,8 @@ Antes de usar a expressão “production candidate”, exigir todos:
 - [ ] graceful shutdown/restart.
 - [ ] multi-host failover.
 - [ ] power-loss evidence.
-- [ ] fuzzing coverage-guided.
-- [ ] dependency/advisory scan.
+- [ ] campanhas longas de fuzzing coverage-guided (harnesses e smoke CI presentes).
+- [ ] dependency/advisory scan público (RustSec presente e scan local PASS).
 - [ ] SBOM.
 - [ ] signed artifacts.
 - [ ] benchmark baseline.
@@ -1529,7 +1518,7 @@ Para dizer que a visão inteira está implementada:
 - [ ] QI integral;
 - [ ] W1–W8;
 - [ ] E1–E5;
-- [ ] TLC registrado;
+- [x] TLC bounded registrado;
 - [ ] paper com baselines equivalentes;
 - [ ] failure bundles públicos reproduzíveis;
 - [ ] resultados de performance e limites negativos publicados.
@@ -1586,17 +1575,19 @@ A documentação ainda referencia o run anterior, mas o run atual também falhou
 BUILD e Cargo.toml agora concordam em 1.89+. Falta decidir se releases fixam o
 compilador exato ou se CI cobre explicitamente MSRV + stable.
 
-### 4. `stable` não é reprodutível
+### 4. Toolchain reproduzível
 
-Para um sistema orientado a determinismo, precisa de política explícita.
+A MSRV foi fixada em Rust 1.89.0; o CI mantém uma segunda perna em `stable` para detectar
+regressões futuras sem usar essa versão flutuante como artefato de release.
 
 ### 5. Snapshot de state machine não é snapshot distribuído operacional
 
 Existe material de snapshot, mas falta install/catch-up end-to-end.
 
-### 6. Fuzz atual não é coverage-guided fuzzing
+### 6. Fuzz coverage-guided precisa de campanha longa
 
-Ainda precisa harness de verdade.
+Os harnesses libFuzzer existem e compilam. Falta evidência pública do smoke Linux e campanhas
+longas com corpus e digests retidos.
 
 ### 7. A auditoria gigante existente não foi adversarialmente verificada em todos os alvos
 
@@ -1654,7 +1645,7 @@ O próximo salto não deveria ser inventar mais mecanismos. Deveria ser tornar o
 
 - [x] `cargo fmt --all -- --check` local.
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` local.
-- [x] `cargo test --workspace` local — 179 testes na MSRV 1.89.0.
+- [x] `cargo test --workspace` local — 181 testes na MSRV 1.89.0.
 - [x] `carolina qualify --quick` local com bundle retido.
 - [x] commit local da árvore auditada.
 - [ ] push da árvore auditada e confirmação do CI.
@@ -1663,6 +1654,9 @@ O próximo salto não deveria ser inventar mais mecanismos. Deveria ser tornar o
 - [x] atualizar README/STATUS para run `cdfca6a`.
 - [x] renomear `FALTA,md` para `FALTA.md`.
 - [x] substituir a auditoria narrativa antiga pelo relatório atual.
+- [x] `cargo audit` local e RustSec no CI.
+- [x] quatro harnesses `cargo-fuzz` e smoke no CI.
+- [x] TLC bounded FM-1/FM-2/FM-3 com runner e checksum fixados.
 
 ## C5 production profile
 
@@ -1685,9 +1679,9 @@ O próximo salto não deveria ser inventar mais mecanismos. Deveria ser tornar o
 - [ ] read-set.
 - [ ] multi-host.
 - [ ] power-loss tests.
-- [ ] fuzz coverage-guided.
+- [ ] campanhas longas de fuzz coverage-guided.
 - [ ] coverage.
-- [ ] cargo audit/deny.
+- [ ] cargo-deny/license policy (`cargo audit` já integrado).
 - [ ] benchmarks.
 - [ ] upgrade/rollback.
 - [ ] SBOM.
@@ -1703,7 +1697,7 @@ O próximo salto não deveria ser inventar mais mecanismos. Deveria ser tornar o
 - [ ] MVP-8 se justificado.
 - [ ] W2–W8.
 - [ ] E1–E5.
-- [ ] TLC.
+- [x] TLC bounded.
 - [ ] paper/baselines.
 
 ---

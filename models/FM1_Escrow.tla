@@ -1,12 +1,13 @@
 ---------------------------- MODULE FM1_Escrow ----------------------------
 (* FM-1 — Escrow transfer, authority and rights conservation (SPEC-006 §8, §11, §16).   *)
 (* This module states the same machine as crates/carolina-models/src/fm1.rs. The Rust   *)
-(* explicit-state checker is the executed artifact; a TLC run of this module must be     *)
-(* recorded separately (tool version, config, state counts) before it counts as evidence.*)
+(* checker and the bounded TLC run are recorded in models/README.md.                    *)
 
 EXTENDS Naturals, Sequences
 
 CONSTANTS Total, Quantities        \* Total : Nat ; Quantities : Seq(Nat), one per transfer
+
+DefaultQuantities == <<1, 2>>      \* Concrete finite sequence used by FM1_Escrow.cfg
 
 Transfers == 1..Len(Quantities)
 

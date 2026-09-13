@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use carolina_core::error::{CoreError, CoreResult, ErrorCode};
 
-use crate::format::{JournalFrame, JournalRecordKind, FRAME_HEADER_LEN};
+use crate::format::{JournalFrame, JournalRecordKind, FRAME_HEADER_LEN, FRAME_TRAILER_LEN};
 use crate::io::{Faults, SeqFile};
 
 pub const DEFAULT_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
@@ -303,9 +303,38 @@ fn is_tail_frame(b: &[u8]) -> bool {
         return true;
     }
     let total = u32::from_le_bytes(b[8..12].try_into().unwrap()) as usize;
-    if total == 0 || total > b.len() {
+    if total < FRAME_HEADER_LEN + FRAME_TRAILER_LEN {
+        return false;
+    }
+    if total > b.len() {
         return true;
     }
     let trailer = u32::from_le_bytes(b[total - 4..total].try_into().unwrap()) as usize;
     trailer != total || b[total..].iter().all(|x| *x == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::io::NoFaults;
+
+    #[test]
+    fn undersized_declared_frame_is_corruption_not_a_panic_or_torn_tail() {
+        let dir = crate::testutil::temp_dir("journal-small-frame");
+        let mut bytes = vec![0u8; FRAME_HEADER_LEN];
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        std::fs::write(segment_path(&dir, 1), bytes).unwrap();
+
+        let result = Journal::open(
+            &dir,
+            1,
+            Arc::new(NoFaults),
+            DurabilityMode::Sync,
+            DEFAULT_SEGMENT_BYTES,
+        );
+        assert!(matches!(result, Err(error) if error.code == ErrorCode::Corruption));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
