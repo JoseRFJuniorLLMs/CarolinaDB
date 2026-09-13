@@ -1,0 +1,14 @@
+[package]
+name = "carolina-models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CarolinaDB formal model targets FM-1/FM-2/FM-3 as explicit-state model checkers (SPEC-010 §16)"
+
+[dependencies]
+
+[lints]
+workspace = true

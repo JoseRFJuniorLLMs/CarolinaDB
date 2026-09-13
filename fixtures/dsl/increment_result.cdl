@@ -1,0 +1,45 @@
+// Fixture: increment_result (SPEC-003 §12)
+// same effect, different observation contracts: receipt vs exact ordered post-value
+RECORD Counter { id: Uuid PRIMARY KEY, value: I64 }
+
+OPERATION bump(counter: Uuid) VERSION 1 {
+  REQUIRE true
+  READ { c = Counter[counter] }
+  EFFECT { INCREMENT Counter[counter].value BY 1 }
+  ENSURE true
+  RETURN { counter: counter }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: LocalSnapshot,
+    result_semantics: Receipt,
+    result_scope: PerKey(Counter[counter]),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Wait },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "counters"
+  }
+}
+
+OPERATION bump_and_get(counter: Uuid) VERSION 1 {
+  REQUIRE true
+  READ { c = Counter[counter] }
+  EFFECT { INCREMENT Counter[counter].value BY 1 }
+  ENSURE true
+  RETURN { counter: counter, value: Counter[counter].value }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: ExactOrderedValue,
+    result_scope: PerKey(Counter[counter]),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "counters"
+  }
+}

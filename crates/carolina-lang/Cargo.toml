@@ -1,0 +1,15 @@
+[package]
+name = "carolina-lang"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CarolinaDB restricted DSL, typed IR, deterministic normalization, canonical artifacts and reference interpreter (SPEC-003)"
+
+[dependencies]
+carolina-core.workspace = true
+
+[lints]
+workspace = true

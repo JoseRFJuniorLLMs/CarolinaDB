@@ -1,0 +1,15 @@
+[package]
+name = "carolina-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CarolinaDB core: typed identities (SPEC-011), canonical encoding and hash domains (SPEC-003/012), checked decimals, ordered key codec (SPEC-002 §11)"
+
+[dependencies]
+sha2.workspace = true
+
+[lints]
+workspace = true

@@ -8,7 +8,7 @@
 **Protocol interfaces:** [SPEC-005](SPEC-005.md), [SPEC-006](SPEC-006.md), [SPEC-007](SPEC-007.md), [SPEC-009](SPEC-009.md)
 **Qualification:** [SPEC-010](SPEC-010.md)
 **Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog and typed authority), [SPEC-012](SPEC-012.md) (request identity, receipts and codecs), [SPEC-013](SPEC-013.md) (security and trust)
-**Reference implementation:** Rust stable; consensus and sequencing outside `astra-storage`
+**Reference implementation:** Rust stable; consensus and sequencing outside `carolina-storage`
 **Normative terms:** MUST, MUST NOT, SHOULD, SHOULD NOT and MAY express requirements on a conforming implementation.
 
 ---
@@ -64,7 +64,7 @@ Final state-dependent rejection is also an observable decision: it must be based
 | Consensus adapter | Leadership, committed authority log, quorum evidence and ordered application | Business validity of an opaque command |
 | Transaction decision authority | One sealed participant set and one final outcome/publication record | A missing participant response means abort |
 | Data authority | Replicated prepared payloads, local install and publication markers | A yes vote is a commit decision |
-| Astra storage | Prepare, local atomic batch, journal durability, MVCC and recovery | A local commit is globally published |
+| CarolinaDB storage | Prepare, local atomic batch, journal durability, MVCC and recovery | A local commit is globally published |
 
 Consensus traffic MAY be multiplexed, but one unrelated hot IDC must not automatically establish a global transaction ordering bottleneck. The v1 topology uses three nodes and fixed voting membership; no automatic elastic scaling is required.
 

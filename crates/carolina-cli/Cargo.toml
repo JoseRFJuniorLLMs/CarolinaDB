@@ -1,0 +1,25 @@
+[package]
+name = "carolina-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CarolinaDB command-line interface"
+
+[[bin]]
+name = "carolina"
+path = "src/main.rs"
+
+[dependencies]
+carolina-core.workspace = true
+carolina-lang.workspace = true
+carolina-compiler.workspace = true
+carolina-storage.workspace = true
+carolina-wire.workspace = true
+carolina-runtime.workspace = true
+carolina-qualify.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,52 @@
+// Fixture: account_transfer (SPEC-003 §12)
+// balances nonnegative; conservation over the closed account domain against Ledger[0].total
+RECORD Account { id: Uuid PRIMARY KEY, balance: Decimal(18, 2) }
+RECORD Ledger { id: U64 PRIMARY KEY, total: Decimal(18, 2) }
+
+INVARIANT balance_nonneg { FORALL a IN Account : a.balance >= 0 }
+INVARIANT conservation { AGGREGATE SUM(a.balance) FOR a IN Account == Ledger[0].total }
+
+OPERATION transfer(source: Uuid, destination: Uuid, amount: Decimal(18, 2)) VERSION 1 {
+  REQUIRE amount > 0 && source != destination
+  READ { s = Account[source], d = Account[destination] }
+  EFFECT { TRANSFER amount FROM Account[source].balance TO Account[destination].balance }
+  ENSURE Account[source].balance >= 0
+  RETURN { source: source, destination: destination, amount: amount }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: Receipt,
+    result_scope: Global(Account),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "ledger"
+  }
+}
+
+OPERATION deposit(account: Uuid, amount: Decimal(18, 2)) VERSION 1 {
+  REQUIRE amount > 0
+  READ { a = Account[account] }
+  EFFECT {
+    INCREMENT Account[account].balance BY amount,
+    INCREMENT Ledger[0].total BY amount
+  }
+  ENSURE true
+  RETURN { account: account, amount: amount }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: Receipt,
+    result_scope: PerKey(Account[account]),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "ledger"
+  }
+}

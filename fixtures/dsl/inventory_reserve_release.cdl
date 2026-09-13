@@ -1,0 +1,103 @@
+// Fixture: inventory_reserve_release (SPEC-003 §12)
+// available >= 0, reserved >= 0, available + reserved == total; reservation identity R
+ENUM ReservationState { Active, Consumed, Released }
+
+RECORD Item { id: Uuid PRIMARY KEY, available: I64, reserved: I64, total: I64 }
+RECORD Reservation { id: Uuid PRIMARY KEY, resource: Uuid, amount: I64, state: ReservationState }
+
+RESOURCE item_capacity ON Item (available: available, reserved: reserved, reservation: Reservation)
+
+INVARIANT available_nonneg { FORALL i IN Item : i.available >= 0 }
+INVARIANT reserved_nonneg { FORALL i IN Item : i.reserved >= 0 }
+INVARIANT supply_conserved { KIND Conservation FORALL i IN Item : i.available + i.reserved == i.total }
+
+OPERATION reserve(item: Uuid, q: I64, rid: Uuid) VERSION 1 {
+  REQUIRE q > 0
+  READ { i = Item[item] }
+  EFFECT { RESERVE item_capacity[item] q AS rid }
+  ENSURE Item[item].available >= 0
+  RETURN { reservation: rid, item: item, quantity: q }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: Receipt,
+    result_scope: PerKey(Item[item]),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "inventory"
+  }
+}
+
+OPERATION release(item: Uuid, q: I64, rid: Uuid) VERSION 1 {
+  REQUIRE q > 0
+  READ { r = Reservation[rid] }
+  EFFECT { RELEASE item_capacity[item] q AS rid }
+  ENSURE Reservation[rid].state == ReservationState::Released
+  RETURN { reservation: rid, item: item }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: Receipt,
+    result_scope: PerKey(Item[item]),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "inventory"
+  }
+}
+
+OPERATION consume(item: Uuid, q: I64, rid: Uuid) VERSION 1 {
+  REQUIRE q > 0
+  READ { r = Reservation[rid] }
+  EFFECT {
+    ADVANCE Reservation[rid].state FROM Active TO Consumed,
+    DECREMENT Item[item].reserved BY q,
+    DECREMENT Item[item].total BY q
+  }
+  ENSURE Reservation[rid].amount == q && Reservation[rid].resource == item
+  RETURN { reservation: rid, item: item, quantity: q }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: Receipt,
+    result_scope: PerKey(Item[item]),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "inventory"
+  }
+}
+
+OPERATION supply(item: Uuid, q: I64) VERSION 1 {
+  REQUIRE q > 0
+  READ { i = Item[item] }
+  EFFECT {
+    INCREMENT Item[item].available BY q,
+    INCREMENT Item[item].total BY q
+  }
+  ENSURE true
+  RETURN { item: item, quantity: q }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: Receipt,
+    result_scope: PerKey(Item[item]),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "inventory"
+  }
+}

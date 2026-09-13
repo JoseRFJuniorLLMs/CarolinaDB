@@ -1,0 +1,79 @@
+// Fixture: causal_refund_extension (SPEC-003 §12)
+// causal_ship plus a refund/cancel that can invalidate the shipment guard.
+// ship and refund exclude each other through their EXISTS guards: causal ordering alone
+// is not a proof that they may execute concurrently.
+ENUM OrderState { Created, Shipped }
+
+RECORD Order { id: Uuid PRIMARY KEY, state: OrderState }
+RECORD PaymentConfirmed IMMUTABLE { order: Uuid PRIMARY KEY, payment: Uuid }
+RECORD ShipmentCreated IMMUTABLE { order: Uuid PRIMARY KEY, shipment: Uuid }
+RECORD Refunded IMMUTABLE { order: Uuid PRIMARY KEY }
+
+INVARIANT order_transitions { TRANSITION o IN Order : o.state FROM Created TO Shipped }
+INVARIANT ship_requires_payment { REQUIRES ship(order) NEEDS PaymentConfirmed(order) }
+
+OPERATION confirm_payment(order: Uuid, payment: Uuid) VERSION 1 {
+  REQUIRE true
+  READ {}
+  EFFECT { EMIT PaymentConfirmed { order: order, payment: payment } }
+  ENSURE true
+  RETURN { order: order, payment: payment }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: CausalContext,
+    result_semantics: Receipt,
+    result_scope: PerKey(PaymentConfirmed[order]),
+    session: { CausalDependencies },
+    session_scope: ReplicationGroup("orders"),
+    durability: LocalStable,
+    partition_outcomes: { Wait },
+    refusal_semantics: MissingDependency,
+    commitment: FinalWhenDurable,
+    request_namespace: "orders"
+  }
+}
+
+OPERATION ship(order: Uuid, shipment: Uuid) VERSION 1 {
+  REQUIRE !EXISTS Refunded[order]
+  READ { o = Order[order] }
+  EFFECT {
+    EMIT ShipmentCreated { order: order, shipment: shipment },
+    ADVANCE Order[order].state FROM Created TO Shipped
+  }
+  ENSURE Order[order].state == OrderState::Shipped
+  RETURN { order: order, shipment: shipment }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: CausalContext,
+    result_semantics: Receipt,
+    result_scope: PerKey(Order[order]),
+    session: { CausalDependencies },
+    session_scope: ReplicationGroup("orders"),
+    durability: LocalStable,
+    partition_outcomes: { Wait },
+    refusal_semantics: MissingDependency,
+    commitment: FinalWhenDurable,
+    request_namespace: "orders"
+  }
+}
+
+OPERATION refund(order: Uuid) VERSION 1 {
+  REQUIRE !EXISTS ShipmentCreated[order]
+  READ { o = Order[order] }
+  EFFECT { EMIT Refunded { order: order } }
+  ENSURE true
+  RETURN { order: order }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: CausalContext,
+    result_semantics: Receipt,
+    result_scope: PerKey(Order[order]),
+    session: { CausalDependencies },
+    session_scope: ReplicationGroup("orders"),
+    durability: LocalStable,
+    partition_outcomes: { Wait },
+    refusal_semantics: MissingDependency,
+    commitment: FinalWhenDurable,
+    request_namespace: "orders"
+  }
+}

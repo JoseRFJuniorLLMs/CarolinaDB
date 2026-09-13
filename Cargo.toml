@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/carolina-core",
+    "crates/carolina-lang",
+    "crates/carolina-compiler",
+    "crates/carolina-storage",
+    "crates/carolina-wire",
+    "crates/carolina-runtime",
+    "crates/carolina-qualify",
+    "crates/carolina-models",
+    "crates/carolina-consensus",
+    "crates/carolina-catalog",
+    "crates/carolina-node",
+    "crates/carolina-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/JoseRFJuniorLLMs/CarolinaDB"
+authors = ["Jose R F Junior <web2ajax@gmail.com>"]
+
+[workspace.dependencies]
+sha2 = "0.10"
+crc32c = "0.6"
+carolina-core = { path = "crates/carolina-core" }
+carolina-lang = { path = "crates/carolina-lang" }
+carolina-compiler = { path = "crates/carolina-compiler" }
+carolina-storage = { path = "crates/carolina-storage" }
+carolina-wire = { path = "crates/carolina-wire" }
+carolina-runtime = { path = "crates/carolina-runtime" }
+carolina-qualify = { path = "crates/carolina-qualify" }
+carolina-models = { path = "crates/carolina-models" }
+carolina-consensus = { path = "crates/carolina-consensus" }
+carolina-catalog = { path = "crates/carolina-catalog" }
+carolina-node = { path = "crates/carolina-node" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.release]
+debug = 1

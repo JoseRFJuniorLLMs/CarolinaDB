@@ -1,0 +1,47 @@
+// Fixture: inventory_sell (SPEC-003 §12)
+// stock >= 0; sell decrements; restock increments (finite I64, overflow checked)
+RECORD Product { id: Uuid PRIMARY KEY, stock: I64 }
+
+INVARIANT stock_nonneg { FORALL p IN Product : p.stock >= 0 }
+
+OPERATION sell(item: Uuid, q: I64) VERSION 1 {
+  REQUIRE q > 0
+  READ { p = Product[item] }
+  EFFECT { DECREMENT Product[item].stock BY q }
+  ENSURE Product[item].stock >= 0
+  RETURN { item: item, quantity: q }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: Receipt,
+    result_scope: PerKey(Product[item]),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "inventory"
+  }
+}
+
+OPERATION restock(item: Uuid, q: I64) VERSION 1 {
+  REQUIRE q > 0
+  READ { p = Product[item] }
+  EFFECT { INCREMENT Product[item].stock BY q }
+  ENSURE true
+  RETURN { item: item, quantity: q }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: Receipt,
+    result_scope: PerKey(Product[item]),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "inventory"
+  }
+}

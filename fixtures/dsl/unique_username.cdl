@@ -1,0 +1,68 @@
+// Fixture: unique_username (SPEC-003 §12)
+// UNIQUE User.username with exact UTF-8 bytewise comparison; register/rename/delete
+RECORD User { id: Uuid PRIMARY KEY, username: String(64) }
+
+INVARIANT unique_username { UNIQUE u IN User : u.username }
+
+OPERATION register(id: Uuid, username: String(64)) VERSION 1 {
+  REQUIRE true
+  READ { present = EXISTS User[id] }
+  EFFECT { INSERT User { id: id, username: username } }
+  ENSURE true
+  RETURN { id: id, username: username }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: Receipt,
+    result_scope: Global(User),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "identity"
+  }
+}
+
+OPERATION rename(id: Uuid, username: String(64)) VERSION 1 {
+  REQUIRE true
+  READ { u = User[id] }
+  EFFECT { ASSIGN User[id].username = username }
+  ENSURE true
+  RETURN { id: id, username: username }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: Receipt,
+    result_scope: Global(User),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "identity"
+  }
+}
+
+OPERATION delete_user(id: Uuid) VERSION 1 {
+  REQUIRE true
+  READ { u = User[id] }
+  EFFECT { DELETE User[id] }
+  ENSURE true
+  RETURN { id: id }
+  CONTRACT {
+    atomicity: WholeInvocation,
+    input_visibility: SerialScope,
+    result_semantics: Receipt,
+    result_scope: Global(User),
+    session: {},
+    session_scope: None,
+    durability: LocalStable,
+    partition_outcomes: { Unavailable },
+    refusal_semantics: BusinessPredicate,
+    commitment: FinalWhenDurable,
+    request_namespace: "identity"
+  }
+}

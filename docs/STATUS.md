@@ -1,0 +1,181 @@
+# CarolinaDB — Implementation Status
+
+**Updated:** 2026-09-11
+**Authoritative stage order:** [SPEC-014](../md/SPEC-014.md). This file records what exists in code and what evidence it has. It never upgrades a stage: `present in code != implemented capability != qualified capability != production-enabled capability`.
+
+## Legend
+
+| Mark | Meaning |
+|---|---|
+| ✅ | implemented and covered by tests in this repository (`cargo test --workspace`) |
+| 🟡 | partially implemented; scope stated in the row |
+| ⬜ | not started |
+| Q: | qualification verdict per SPEC-010 (`PASS` only for the stated scope; `NOT_RUN` otherwise) |
+
+## Documentation closure (REVISAR-02 §21)
+
+| Item | Status |
+|---|---|
+| SPEC-009 v0.2 / SPEC-010 v0.2 / SPEC-011–014 present | ✅ (authored by the project owner) |
+| Cross-SPEC lint `tools/spec_lint.py` (aliases, schema owners, dangling refs/sections/links, naming residue, FM gates) | ✅ PASS, negative control verified |
+| Ownership matrix `md/SPEC-OWNERSHIP.md` | ✅ |
+| Naming cleanup (`AstraDB`/`astra-*`/`astra <cmd>` → CarolinaDB/`carolina-*`/`carolina`; `astra.*` domains kept) | ✅ |
+| README status section | ✅ |
+| `ARCHITECTURE-FREEZE-0.1.md` | ⬜ (to be produced once the codec manifest is frozen) |
+
+## MVP-0 — Semantic core (SPEC-003)
+
+| Deliverable | Status | Where |
+|---|---|---|
+| Typed identity taxonomy (SPEC-011 §2), `RequestKey`, `TxnId` layout (SPEC-012 §3), `IdcBinding`, `PlanRef`, `AuthorityBinding` | ✅ | `crates/carolina-core/src/ids.rs` |
+| Restricted canonical JSON encoder/decoder with re-encode check, limits, negative cases | ✅ | `crates/carolina-core/src/canon.rs` |
+| Domain-separated SHA-256, all `astra.*` domains | ✅ | `crates/carolina-core/src/hash.rs` |
+| Checked `Decimal(p,s)` | ✅ | `crates/carolina-core/src/decimal.rs` |
+| Order-preserving key codec v1 (SPEC-002 §11) | ✅ | `crates/carolina-core/src/keycodec.rs` |
+| DSL lexer/parser (RECORD/ENUM/INDEX/RESOURCE/INVARIANT/OPERATION, explicit sections) | ✅ | `crates/carolina-lang/src/{lexer,parser}.rs` |
+| Stable ID allocation, type check, lowering, footprints | ✅ | `crates/carolina-lang/src/lower.rs` |
+| `ModuleIR`/`InvariantIR`/`OperationIR`/`EffectIR`/`ContractIR` canonical encoding + hashes | ✅ | `crates/carolina-lang/src/ir.rs` |
+| Reference interpreter (checked arithmetic, full-scope invariants, normalized literal effects, replay) | ✅ | `crates/carolina-lang/src/interp.rs` |
+| Bounded concurrent-acceptance counterexample explorer + replay | ✅ | `crates/carolina-lang/src/counterexample.rs` |
+| Seven SPEC-003 §12 fixtures + golden IR bytes/hashes | ✅ | `fixtures/dsl/*.cdl`, `fixtures/golden/*` |
+| S003-A01, A02, A03, A04, A06, A08, A10 | ✅ tests | `crates/carolina-lang/src/fixtures.rs` |
+| S003-A05 (aliasing/phantom/aggregate footprint tests), A07 (request identity), A09 (fuzz), A11 (session scope) | 🟡 A11 at lowering (nonempty session needs scope); A07 covered end-to-end by the runtime tests; A05/A09 pending |
+| Q0 verdict | Q: PASS for the stated scope via `carolina qualify` (golden corpus, deterministic artifacts, reference evaluator with negative control); see "Qualification system" |
+
+Golden files under `fixtures/golden/` are the IR1 freeze candidates. They MAY be re-frozen with
+`UPDATE_GOLDEN=1 cargo test -p carolina-lang` until `ARCHITECTURE-FREEZE-0.1.md` pins their digests.
+
+## MVP-1 — Conservative compiler (SPEC-004)
+
+| Deliverable | Status | Where |
+|---|---|---|
+| Closure/IDC templates (union-find over record footprints), directed interactions (RequiresVisible, InvalidatesGuard, AtomicWith) | ✅ | `crates/carolina-compiler/src/analysis.rs` |
+| Per-candidate obligations IR-DEF, IR-FOOT, DURABILITY, AUTHORITY, RUNTIME-CAPABILITY, IR-OBS, SESSION, IR-SEQ, IR-CONC, IR-ATOM, IR-COMP with `ProofStatus` Proven / Disproven(replayable counterexample) / Unknown | ✅ | `analysis.rs`, `explore.rs` |
+| Bounded concurrent-acceptance exploration from generated small states (deterministic budget) | ✅ | `explore.rs` |
+| Protocol library manifest (C0 local + C5 serial qualified; C1–C4 present, unqualified) and analysis rule manifest, both hashed into the certificate | ✅ | `library.rs`, `rules.rs` |
+| Deterministic selection: C5 baseline, cheaper replacement only with proven obligations (C0 in local topology) | ✅ | `select.rs` |
+| Canonical `OperationPlan`, `ConsistencyCertificate`, artifact checker (`check_artifacts`), EXPLAIN | ✅ | `plan.rs`, `select.rs`, `explain.rs` |
+| Unsafe/incomplete scopes rejected (`UnsatisfiableDurability`, `UnsupportedSessionScope`, `UnmetObservationContract`, `NoSafePlan`) | ✅ tests | `crates/carolina-compiler/src/select.rs` |
+| CLI `carolina compile / explain / check / ir / fixtures` | ✅ | `crates/carolina-cli/src/main.rs` |
+| CC0 / CC1 (C5 portion) verdict | Q: PASS for the stated scope via `carolina qualify` Q0-DETERMINISM (18 plans, tampered artifacts refused); no distributed runtime qualification of any candidate |
+
+Candidates remain inactive until runtime qualification (SPEC-004 §13); the local runtime activates only
+plans whose atomicity is one local batch and whose durability is `LocalStable`.
+
+## MVP-2 — Local durable slice (SPEC-002, SPEC-012 local identity)
+
+| Deliverable | Status | Where |
+|---|---|---|
+| On-disk formats: 8 KiB pages with CRC32C, journal frames, MANIFEST A/B, torn-tail detection | ✅ | `crates/carolina-storage/src/format.rs` |
+| Fault-injectable positional I/O (`FaultPoint` at every durable boundary, crash and I/O-error actions) | ✅ | `io.rs` |
+| B+Tree with MVCC versions `(key ASC, seq DESC)`, `(key, seq)` separators, overflow chains, copy-on-write persistence at checkpoint, structural verification | ✅ differential tests vs `BTreeMap` oracle incl. small pools and reopen | `btree.rs`, `tests/btree_differential.rs` |
+| Buffer pool (CLOCK, never evicts dirty pages, bounded overshoot under dirty pressure) | ✅ | `buffer.rs` |
+| Redo-first journal, segments, group/sync/unsafe durability modes, torn-tail truncation only in the last segment, mid-log corruption fails closed | ✅ | `journal.rs`, `tests/kernel.rs` |
+| `CompiledBatch` / `ProtocolOnlyBatch` with semantic digest, one mutation per key, protocol record CAS (`ExpectedRecordRevision`), `TxnStatusRecord` phase machine | ✅ | `batch.rs` |
+| `DurableStorageKernel`: commit, commit_protocol, prepare/commit_prepared/abort_prepared (prepared state invisible, IN_DOUBT reported, decisions durable and idempotent), snapshots, checkpoint, recovery, verify | ✅ | `kernel.rs`, `tests/kernel.rs` |
+| Reference `MemKernel` and Store ⇄ MemKernel differential (user rows and txn statuses) | ✅ | `memkernel.rs`, `tests/kernel.rs` |
+| Crash campaign: every fault point × n-th occurrence, checking P1 (acked commits present), P2/P3 (crashed step all-or-nothing), P6 (recovery idempotent), P9 (prepared invisible/in doubt); injected I/O error never yields success | ✅ 52 crashing cases | `tests/crash_matrix.rs` |
+| Local RequestHome: durable `request_home_state`, epoch advance per open, BindIfAbsent with CAS, identity conflict on changed content | ✅ | `crates/carolina-runtime/src/home.rs` |
+| Explicitly local `authority_grant` written at create and verified at open (no mocked distributed durability) | ✅ | `crates/carolina-runtime/src/engine.rs` |
+| Request path: admission (schema/operation/contract hashes, typed arguments) → bind → closure state load → interpreter → `CompiledBatch` (binding transition + terminal `TxnStatusRecord` + receipt) → reply | ✅ | `engine.rs` |
+| `FinalReceiptV1` persisted at the home, `ResolveRequest` → identical receipt, `OutcomeUnknown` on post-barrier failure, business rejections are final REJECTED receipts | ✅ | `engine.rs`, `tests/local_slice.rs` |
+| Result eviction → `ResultTombstoneV1`; namespace retirement → `IdentityExpired` | ✅ | `engine.rs` |
+| SPEC-014 §4 schedules: last unit contention, duplicate release, overflow, changed content under one key, crash after allocation, crash after commit before reply, result eviction, retired namespace after restart, checkpoint + reopen with identical receipts | ✅ | `crates/carolina-runtime/tests/local_slice.rs` |
+| CLI `carolina verify <dir>` and `carolina workload <dir>` | ✅ | `crates/carolina-cli/src/main.rs` |
+| Snapshots/restore (`SnapshotManifestV1`/chunks) wired into the store | 🟡 wire records and validation only (`crates/carolina-wire/src/snapshot.rs`); no store export/import yet |
+| Journal segment retention / MVCC garbage collection | ⬜ (versions and segments are retained; correctness-first) |
+| Q1/Q2 verdicts | Q: PASS for the stated scope (see "Qualification system" below): `carolina qualify` gates Q0, Q1, Q2 PASS; fault model process kill / short write inside one process; OS page-cache loss is not modelled (SPEC-010 §7). |
+
+## Qualification system (SPEC-010)
+
+| Deliverable | Status | Where |
+|---|---|---|
+| `QualificationManifest` (§2): source revision + working-tree digest over every tracked file, dirty flag, toolchain (rustc from `build.rs`), lock digest, enabled/disabled features with justification, workloads, seeds, budgets | ✅ | `crates/carolina-qualify/src/manifest.rs` |
+| Statuses PASS/FAIL/INCONCLUSIVE/NOT_RUN/NOT_APPLICABLE, gate derivation (a NOT_APPLICABLE required check never opens a gate), claimed gates, exit codes 0/1/2/3 | ✅ | `verdict.rs` |
+| Observable history (§4): Invoke/AdmissionRefusal/FinalReply/UnknownReply/ExpiredReply/Decision/Crash/Restart/Checkpoint/Resolve/ResultEvicted/NamespaceRetired, canonical JSONL, trace digest | ✅ | `history.rs` |
+| Independent W1 oracle (§3/§4/§11): hand-written inventory model, no DSL interpreter import, exact result values | ✅ | `w1.rs` |
+| History checker (§5): Q-C01, Q-C02, Q-C03, Q-C04, Q-C05, Q-C13, Q-C14 with branch exploration of unresolved unknowns and a budget (INCONCLUSIVE when exceeded); Q-C06–Q-C12 NOT_APPLICABLE with the disabled capability named | ✅ | `checker.rs` |
+| Deterministic local schedules over the runtime engine (§6/§7): seeded W1 workload with retries, changed content, eviction, retirement, restarts, checkpoints; crash at every `FaultPoint` × n-th occurrence; every request resolved after final recovery; engine state read back for the oracle | ✅ | `local.rs` |
+| Storage campaigns P1–P10 as callable functions shared by tests and the runner | ✅ | `crates/carolina-storage/src/campaign.rs` |
+| Minimizer (§15, delta debugging over the schedule, re-checked by the oracle) and bundles (`manifest.json`, `verdict.json`, `history.jsonl`, `schedule.json`, `metrics.json`, `reproduction.md`, `initial-state/`, `contracts/`, `plans/`, `evidence/`) | ✅ | `minimize.rs`, `bundle.rs` |
+| Campaign runner (§17) and CLI `carolina qualify / simulate / replay / minimize / report` | ✅ | `runner.rs`, `crates/carolina-cli/src/main.rs` |
+| Acceptance of the qualification system (§18): QA-01 (identical trace digest), QA-02 (negative controls: duplicated effect, ack before durable, erased earlier reservation = QA-08, unknown treated as abort), QA-03, QA-04 (budget → INCONCLUSIVE), QA-05 (omitted scenario → NOT_RUN, non-zero exit), QA-07 (unsafe no-fsync refused), QA-10 (test root allowlist) | ✅ | `crates/carolina-qualify/tests/acceptance.rs` |
+| Formal models FM-1/FM-2/FM-3 (§16): explicit-state BFS checkers with exhaustive exploration under stated bounds and mandatory negative controls (each broken variant produces a counterexample trace); TLA+ sources + `.cfg` for TLC in `models/` | ✅ PASS within bounds (FM-1: 3268 states, 5 controls; FM-2: 486 states, 6 controls; FM-3: 3392 states, 5 controls). TLC has **not** been run (no toolchain recorded). Bounded model evidence only: the protocols are not implemented, so Q3–Q6 stay NOT_RUN | `crates/carolina-models/src/{fm1,fm2,fm3}.rs`, `models/` |
+| Codec golden corpus (SPEC-012 §12, SPEC-014 §5): `fixtures/codec/` freezes 52 canonical vectors (23 registered record kinds plus node log/admin payloads and consensus envelopes) with digests in `manifest.txt`; every vector must be a decode/encode fixed point and 208 derived negative vectors (unknown field, truncation, number literal, whitespace) must be refused | ✅ `QI-CODEC-CORPUS` PASS; re-freeze only with `UPDATE_GOLDEN=1 cargo test -p carolina-qualify codec` | `crates/carolina-qualify/src/codec_corpus.rs`, `fixtures/codec/` |
+| QI security (SPEC-013) | ⬜ NOT_RUN — mTLS/authorization not implemented |
+
+Latest `carolina qualify --quick` (2026-09-11, debug build, this tree): gates **Q0 PASS, Q1 PASS, Q2 PASS,
+FM PASS, Q3-C5 PASS** (claimed), QI/Q3–Q7 NOT_RUN (not claimed). The Q3-C5 scope: consensus simulation
+(seed set, 20 proposals, loss/dup/delay, crash+restart of every voter, isolated leader, replay
+determinism) and the three-process campaign (leader kill, restart + replay, majority kill). Scope of the PASS: Q0 = 7 golden fixtures, 18 plans
+deterministic, 7 tampered plans refused, last-unit race found/replayed with a quiet negative control;
+Q1 = 9000 B+Tree ops with reference scans, crash matrix 13 fault points × nth 1..=2 (19 crashing cases),
+torn tail / mid-log corruption / injected I/O error; Q2 = prepared invisibility, epoch change, 300-batch
+kernel differential, 14 W1 schedules (seed 1, 16 ops, 13 fault points) against the independent oracle
+with identical trace digests on replay. `cargo run -p carolina-cli -- qualify --out qualification`
+runs the standard budgets and writes the bundle.
+
+## MVP-3 — Catalog and single-IDC C5 (SPEC-008 §5/§8, SPEC-011, SPEC-012 §3/§9–§10, SPEC-013)
+
+| Deliverable | Status | Where |
+|---|---|---|
+| Consensus adapter (SPEC-008 §5): deterministic Raft, fixed three-voter membership, persistent term/vote/log (`raft.state` atomic rename, `raft.log` CRC32C frames with torn-tail discard), term no-op, quorum commit, read barrier (`ReadIndex` round acknowledged by a quorum), no wall-clock leases | ✅ | `crates/carolina-consensus/src/{lib,storage}.rs` |
+| Deterministic cluster simulator (SPEC-010 §6): seeded scheduler, loss/duplication/delay, directional partitions, crash/restart from modeled durable state; invariants election safety, log matching, state-machine safety, leader completeness checked after every delivery; reproducible traces | ✅ | `crates/carolina-consensus/src/sim.rs` |
+| Catalog state machine (SPEC-011 §3–§5, §7–§8): typed `CatalogKey`s, `CatalogCommand` CAS with expected revisions + digests, phantom-safe scope-lock overlap predicate, one `CatalogGeneration` per successful command, idempotent `AdminRequestId` results, `IdentityConflict` on reuse with different bytes, genesis over a pinned bootstrap manifest (hash verified by every voter, second genesis refused, exactly three voters), grant lifecycle `STAGED→ACTIVE→CLOSING→CLOSED→RETIRED` (closed never reopens), request routes, tombstones that refuse re-insertion | ✅ | `crates/carolina-catalog/src/lib.rs` |
+| Node process: `ASTR`/TCP transport with Hello/HelloAck negotiation, role-bound frame kinds (`Consensus` only from `Node` peers, `Admin` only from admin endpoints), peer links with reconnection, single-threaded core | ✅ | `crates/carolina-node/src/{transport,core}.rs`, binary `carolina-node` |
+| Single-IDC C5 ordered execution (SPEC-008 §8): leader admits an `Invoke` as an ordered `Admit` entry; every voter executes the same deterministic engine step in log order; the leader proposes the unique `Decision` (receipt digest); the client reply waits for that decision's commit; followers verify their own digest and fail closed on divergence; `ResolveRequest` served by the leader only after a read barrier; a follower/minority refuses mutations | ✅ | `crates/carolina-node/src/core.rs` |
+| Replicated RequestHome: pinned home epoch, allocation counter written in the same protocol batch as each binding, so a new leader continues the same `TxnId` sequence | ✅ | `crates/carolina-runtime/src/home.rs` (`open_pinned`) |
+| Bootstrap through the log: genesis → home grant STAGED → ACTIVE → request route (idempotent admin ids; a new leader resumes) | ✅ | `core.rs` `leader_duties` |
+| Real-process campaign (SPEC-010 §9 subset): three `carolina-node` processes, isolated data directories, loopback; C5-001/009/010/021 and replicated determinism after killing the leader, restarting it and killing a majority | ✅ | `crates/carolina-node/src/campaign.rs`, `tests/three_nodes.rs` |
+| SPEC-013 mTLS / authorization / credential records | ⬜ **not implemented** — only the `DEV_LOCAL` plaintext profile exists and the node never advertises `ENCRYPTED_HOST_V1`; no security qualification is claimed |
+| Log compaction / catalog snapshots (SPEC-011 §9), dynamic membership | ⬜ (the log is replayed from index 1 at restart; membership is fixed) |
+| QI verdict | Q: `QI-CATALOG` PASS (CAT-01/02/05/12/15/16 + closed-never-reopens); `QI-CODEC-CORPUS` PASS (52 vectors / 23 kinds; kinds of disabled features are listed as not frozen); `QI-SECURITY` NOT_RUN → gate QI NOT_RUN |
+| Q3 verdict | Q: gate **`Q3-C5` PASS** for the single-IDC C5 slice (`Q3-CONSENSUS-SIM` + `Q3-C5-PROCESS` + `QI-CATALOG` + FM-2 model within bounds); gate Q3 (C1/C2/C3 slices) NOT_RUN |
+
+## MVP-4 … MVP-8
+
+⬜ Not started. Multi-IDC publication, C1/C2, C3, evolution and C4 do not exist; their FM
+*models* pass within bounds (see above) but no protocol implementation, deterministic simulator
+adapter or real-process campaign exists for them.
+
+## Test evidence (this tree)
+
+`cargo test --workspace` on 2026-09-11: core 25, lang 19, compiler 10, wire 7, storage 17
+(3 format + 4 B+Tree differential + 3 crash matrix/epoch + 7 kernel), runtime 10 (1 unit + 9 end-to-end),
+qualify 11 (4 unit incl. the codec corpus + 7 acceptance incl. one quick campaign), models 4 (three positive models with
+negative controls), consensus 8, catalog 3, node 1 (three real processes);
+`cargo clippy --workspace --all-targets` clean; `cargo fmt --all -- --check` clean;
+`tools/spec_lint.py` PASS.
+
+## Release artifacts
+
+| Item | Status |
+|---|---|
+| `LICENSE` (Apache-2.0, as declared in `Cargo.toml`; owner to confirm) | ✅ file present |
+| `.github/workflows/ci.yml` (spec lint, fmt, clippy `-D warnings`, tests, quick qualification campaign with uploaded bundle; Linux + Windows) | ✅ not yet executed on a CI service |
+| `SECURITY.md` | ✅ |
+| SBOM, signed releases, `docs/build` | ⬜ |
+
+## Known deviations and decisions
+
+- Fact records are declared `RECORD name IMMUTABLE { … }` (grammar extension for SPEC-003 §6 `EmitFact` targets).
+- `RESOURCE` is a module item binding `available`/`reserved` fields and the reservation record (SPEC-003 §6 `ResourceDecl`).
+- `REQUIRES op(params) NEEDS Fact(params)`: the fact primary key is built from the listed operation parameters.
+- `authority_requirements` may be omitted in `CONTRACT` and then equals the empty list; all other contract fields are mandatory.
+- Multiplication is restricted to the affine fragment (one operand is a constant), per SPEC-003 §4.
+- Storage persists dirty pages copy-on-write at checkpoint (shadow paging): a dirty page is never rewritten in place and never evicted; the checkpoint rewrites dirty pages under fresh ids bottom-up and publishes the new root through the manifest. Sibling pointers are unused (scans re-seek by key and find the right neighbour through the parent path). Internal separators are full `(key, seq)` positions. Values above 1024 bytes go to immutable overflow chains.
+- A `CompiledBatch` carries at most one mutation per logical key (the final per-key effect of one execution); duplicates are refused at `verify()`.
+- The first durable `TxnStatusRecord` of a prepared transaction is its decision (INSTALLED/TERMINAL or ABORTED under revision 1): the PREPARED phase lives only in the journal, and the status phase machine accepts any phase as the first durable record.
+- Abort of a prepared transaction consumes a local commit sequence (its ABORTED status is installed like a protocol-only batch) so that recovery replays it deterministically.
+- The local RequestHome advances its epoch on every open instead of scanning bindings for the highest allocated sequence; a crashed allocation therefore never collides with a new one.
+- Rows are stored as canonical `row.v1` values (primary key + typed fields) under `Namespace::User || RecordId || key`; the runtime loads the closure records of an operation in full before evaluation (correctness-first; no partial footprint loading yet).
+- New registered record kind `request_home_state` (SPEC-012 owner) for the home's durable epoch/allocation state.
+- `LICENSE` holds the Apache-2.0 text because `Cargo.toml` declares that license; the owner has not confirmed the choice.
+- The qualification runner's fault model is process kill / short write inside one process (real files, real fsync); it is labelled deterministic because the engine consults no OS time, randomness or threads, and `Q2-DETERMINISM` re-runs a crashing schedule and compares trace digests.
+- `carolina qualify` claims only gates Q0, Q1, Q2, FM and Q3-C5; every other gate is reported NOT_RUN and makes the exit code non-zero only when claimed.
+- Ordered execution is recorded as two log entries per request (`Admit`, then the admitting node's `Decision` with the receipt digest); the v1 reference path keeps the explicit protocol even though one process holds several roles (SPEC-008 §8).
+- Wire `MessageKind`s 12–14 (`Consensus`, `Admin`, `AdminReply`) were added before the codec manifest freeze; they are never accepted on client-role connections.
+- The node advertises and accepts only the `DEV_LOCAL` security profile; TLS/mTLS (SPEC-013 §3) needs a maintained TLS implementation, which is a dependency decision left to the owner.
+- Voters replay the whole log at restart (no compaction); engine steps are idempotent by request binding, so replay never re-executes a decided request.
+- Typed decoding is strict by construction: `Canonical::decode` re-projects the decoded value to canonical form and requires equality with the input, so unknown fields and lossy projections are refused by every decoder (found by the codec corpus: `ResolveReplyV1` had accepted unknown fields).
+- Registered record kinds whose features are disabled (snapshots, C1/C2/C3/C4, evolution, session tokens) have no codec and are reported as not frozen; enabling such a feature requires freezing its vectors first (SPEC-014 §5).

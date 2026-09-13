@@ -1,0 +1,17 @@
+[package]
+name = "carolina-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CarolinaDB storage kernel: page store, B+Tree, MVCC, Commit Journal, atomic CompiledBatch, prepared transactions, checkpoint and crash recovery (SPEC-002)"
+
+[dependencies]
+carolina-core.workspace = true
+carolina-wire.workspace = true
+crc32c.workspace = true
+
+[lints]
+workspace = true

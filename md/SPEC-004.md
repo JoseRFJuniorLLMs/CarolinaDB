@@ -325,7 +325,7 @@ Plans and certificates SHALL use SPEC-003's canonical artifact encoding with the
 
 The artifact checker validates canonical bytes, identities, hashes, recognized rule/template versions, complete obligation coverage and reference integrity. It MUST distinguish “manifest structurally valid” from “proof obligations checked” and “runtime qualified.” A hash proves byte identity, not theorem correctness or authenticity. Plan signatures are a separate catalog/security mechanism.
 
-`astra explain operation <name>` SHALL display selected family and all added requirements; affected invariants/IDCs; input visibility and returned-result semantics; each accepted/rejected/unknown candidate; authority and durability assumptions; partition behavior; fallback prerequisites; and unqualified runtime features. `astra compile`, `astra check`, `astra plan` and `astra graph invariants` are deterministic artifact operations, not automatic activation.
+`carolina explain operation <name>` SHALL display selected family and all added requirements; affected invariants/IDCs; input visibility and returned-result semantics; each accepted/rejected/unknown candidate; authority and durability assumptions; partition behavior; fallback prerequisites; and unqualified runtime features. `carolina compile`, `carolina check`, `carolina plan` and `carolina graph invariants` are deterministic artifact operations, not automatic activation.
 
 Example output requirements for a sell receipt:
 

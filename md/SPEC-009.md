@@ -270,10 +270,10 @@ Required typed errors include `MigrationInProgress`, `UnsupportedMigrationScope`
 Proposed diagnostic interface:
 
 ```text
-astra plan diff <source> <candidate>
-astra migration inspect <migration_id>
-astra migration resume <migration_id>
-astra txn status <txn_id>
+carolina plan diff <source> <candidate>
+carolina migration inspect <migration_id>
+carolina migration resume <migration_id>
+carolina txn status <txn_id>
 ```
 
 `inspect` is read-only. `resume` only re-enters the recorded protocol; it has no force-success flag. Reports include current phase, scope, missing authorities, pinned data, unresolved work, target readiness, and proof status. Do not log raw client arguments/results by default.

@@ -6,7 +6,7 @@
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md)
 **Integrates with:** [SPEC-006](SPEC-006.md), [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)
 **Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog, typed identity and authority), [SPEC-012](SPEC-012.md) (request identity, client protocol and codecs), [SPEC-013](SPEC-013.md) (security and trust)
-**Reference implementation:** Rust stable; initially modules within `astra-runtime`
+**Reference implementation:** Rust stable; initially modules within `carolina-runtime`
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY state requirements of this draft.
 
 ## 1. Decision and scope

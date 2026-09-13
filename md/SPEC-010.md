@@ -367,11 +367,11 @@ The minimizer shrinks operation count, keys/values, messages and faults while pr
 Proposed CLI (implementation deliverable, not currently available commands):
 
 ```text
-astra qualify --manifest <file>
-astra simulate --manifest <file> --seed <seed>
-astra replay --bundle <path>
-astra minimize --bundle <path>
-astra report --campaign <path>
+carolina qualify --manifest <file>
+carolina simulate --manifest <file> --seed <seed>
+carolina replay --bundle <path>
+carolina minimize --bundle <path>
+carolina report --campaign <path>
 ```
 
 The runner returns distinct process exit codes for pass, failure, inconclusive and invalid configuration. Do not overload timeout with pass. Store schema versions for evidence so later tools can read earlier campaigns or fail explicitly.

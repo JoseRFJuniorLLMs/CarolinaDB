@@ -1,4 +1,4 @@
-# SPEC-002 — Astra Storage Kernel
+# SPEC-002 — CarolinaDB Storage Kernel
 
 **Subtitle:** Page Store, MVCC, Commit Journal, Atomic Batches and Crash Recovery
 **Status:** Draft 0.2 — proposed boundary; formats and runtime qualification pending
@@ -6,6 +6,7 @@
 **Depends on:** `SPEC-001 — Invariant-Compiled Consistency`
 **Shared contracts:** [SPEC-011](SPEC-011.md) identities/catalog; [SPEC-012](SPEC-012.md) request/receipt/encoding; [SPEC-013](SPEC-013.md) trust profiles
 **Reference implementation:** Rust stable
+**Project:** CarolinaDB. `Astra` survives only as the permanent protocol codename in hash domains (`astra.*`), the wire magic `ASTR`, URI SANs (`astra://`) and file extensions (`.astr`, `.astj`); it is not a product, crate or CLI name.
 **Scope:** local storage kernel and durable boundary consumed by the distributed consistency runtime
 **Out of scope:** protocol synthesis, C0–C5 selection, global routing, Raft, SQL optimizer, vector/graph/AI features
 
@@ -13,12 +14,12 @@
 
 ## 0. Decision
 
-AstraDB SHALL use a **page-oriented ordered storage engine based on a B+Tree, MVCC, an explicit buffer pool and a redo-first Commit Journal**.
+CarolinaDB SHALL use a **page-oriented ordered storage engine based on a B+Tree, MVCC, an explicit buffer pool and a redo-first Commit Journal**.
 
-The storage structure is deliberately conventional. AstraDB's research claim is not “a better tree”. The storage kernel exists to provide a deterministic, inspectable substrate on which `SPEC-001` can safely execute different consistency plans.
+The storage structure is deliberately conventional. CarolinaDB's research claim is not “a better tree”. The storage kernel exists to provide a deterministic, inspectable substrate on which `SPEC-001` can safely execute different consistency plans.
 
 ```text
-                         Astra Semantic Runtime
+                         CarolinaDB Semantic Runtime
                                  │
                                  │ CompiledBatch
                                  │ PlanContext
@@ -94,7 +95,7 @@ A page-oriented B+Tree provides this without making compaction policy the center
 
 ## 2. Non-goals
 
-SPEC-002 SHALL NOT turn AstraDB into:
+SPEC-002 SHALL NOT turn CarolinaDB into:
 
 - another LSM research project;
 - another immutable event store;
@@ -138,7 +139,7 @@ Reference:
 
 https://umbra.db.in.tum.de/
 
-AstraDB adopts classic WAL/redo principles but intentionally avoids ordinary undo recovery by ensuring uncommitted mutations are never published into committed MVCC state.
+CarolinaDB adopts classic WAL/redo principles but intentionally avoids ordinary undo recovery by ensuring uncommitted mutations are never published into committed MVCC state.
 
 ---
 
@@ -221,7 +222,7 @@ This representation is the MVP MVCC layout.
 
 ## 7. No cluster-global physical version
 
-AstraDB SHALL NOT create one global physical commit counter.
+CarolinaDB SHALL NOT create one global physical commit counter.
 
 Each local storage authority maintains:
 
@@ -409,7 +410,7 @@ Every page MUST carry CRC32C.
 
 CRC32C is accidental-corruption detection, not hostile tamper evidence.
 
-AstraDB SHALL NOT claim cryptographic integrity from a checksum.
+CarolinaDB SHALL NOT claim cryptographic integrity from a checksum.
 
 ---
 
@@ -513,7 +514,7 @@ It MUST NOT be an MVP dependency.
 
 ## 23. Explicit buffer pool
 
-AstraDB SHALL use an explicit buffer pool rather than `mmap` as the default mutable page path.
+CarolinaDB SHALL use an explicit buffer pool rather than `mmap` as the default mutable page path.
 
 Reasons:
 
@@ -771,7 +772,7 @@ range -> range token
 
 This MUST be opt-in by plan.
 
-AstraDB SHALL NOT pay SSI-like tracking overhead on every transaction.
+CarolinaDB SHALL NOT pay SSI-like tracking overhead on every transaction.
 
 ---
 
@@ -913,7 +914,7 @@ It is not an eternal historical truth log.
 
 HeraclitusDB's immutable event log is its canonical history.
 
-AstraDB's journal is:
+CarolinaDB's journal is:
 
 ```text
 durability + recovery + replication substrate
@@ -921,7 +922,7 @@ durability + recovery + replication substrate
 
 Old journal segments MAY be reclaimed after all safety horizons pass.
 
-AstraDB does not promise `AS OF LSN` forever.
+CarolinaDB does not promise `AS OF LSN` forever.
 
 This distinction MUST remain architectural, not merely marketing.
 
@@ -1569,7 +1570,7 @@ Replicated repair belongs to later specs.
 
 # Part XIII — MVCC GC
 
-## 87. AstraDB is not unlimited time travel
+## 87. CarolinaDB is not unlimited time travel
 
 Old MVCC versions SHALL be reclaimed when no longer needed.
 
@@ -2025,13 +2026,13 @@ Recommended:
 
 ```text
 crates/
-  astra-core
-  astra-storage
-  astra-runtime
-  astra-server
+  carolina-core
+  carolina-storage
+  carolina-runtime
+  carolina-server
 ```
 
-Inside `astra-storage`:
+Inside `carolina-storage`:
 
 ```text
 page/
@@ -2049,7 +2050,7 @@ io/
 
 ---
 
-## 120. `astra-core`
+## 120. `carolina-core`
 
 Contains:
 
@@ -2070,7 +2071,7 @@ No file I/O.
 
 ---
 
-## 121. `astra-storage`
+## 121. `carolina-storage`
 
 Owns:
 
@@ -2090,7 +2091,7 @@ verification
 
 ---
 
-## 122. `astra-runtime`
+## 122. `carolina-runtime`
 
 Consumes compiled plans and maps operations into protocol paths.
 
@@ -2100,7 +2101,7 @@ C0–C5 runtime implementations belong to later SPECs.
 
 ## 123. DurableStorageKernel boundary
 
-The semantic runtime depends on this kernel boundary, with the native Astra B+Tree as the selected implementation. A reference in-memory backend has an explicit simulated durability model; an experimental PostgreSQL/other backend is a research adapter. Every backend declares support for durable prepare, atomic metadata/result writes, recoverable semantic records, snapshots and retained references; unsupported obligations disable the corresponding plans. No adapter may silently emulate durable prepare with volatile memory or weaken final ACKs. Page/checkpoint tooling remains native-engine specific.
+The semantic runtime depends on this kernel boundary, with the native CarolinaDB B+Tree as the selected implementation. A reference in-memory backend has an explicit simulated durability model; an experimental PostgreSQL/other backend is a research adapter. Every backend declares support for durable prepare, atomic metadata/result writes, recoverable semantic records, snapshots and retained references; unsupported obligations disable the corresponding plans. No adapter may silently emulate durable prepare with volatile memory or weaken final ACKs. Page/checkpoint tooling remains native-engine specific.
 
 ```rust
 pub trait DurableStorageKernel {
@@ -2179,7 +2180,7 @@ Any unsafe storage optimization requires:
 Command:
 
 ```text
-astra storage verify
+carolina storage verify
 ```
 
 Checks:
@@ -2200,7 +2201,7 @@ Checks:
 ## 128. Journal verifier
 
 ```text
-astra journal verify
+carolina journal verify
 ```
 
 Checks:
@@ -2217,11 +2218,11 @@ Checks:
 ## 129. Diagnostic tools
 
 ```text
-astra storage info
-astra storage dump-page <id>
-astra journal inspect
-astra txn status <txn_id>
-astra checkpoint
+carolina storage info
+carolina storage dump-page <id>
+carolina journal inspect
+carolina txn status <txn_id>
+carolina checkpoint
 ```
 
 Diagnostic read-only tools MUST NOT mutate storage.
@@ -2487,7 +2488,7 @@ banking workload
 causal order workflow
 ```
 
-Storage performance cannot be evaluated only on synthetic KV operations when AstraDB exists to execute compiled business operations.
+Storage performance cannot be evaluated only on synthetic KV operations when CarolinaDB exists to execute compiled business operations.
 
 ---
 
@@ -2594,7 +2595,7 @@ GPU is out of scope for the storage kernel.
 
 ## 156. No CXL dependency
 
-AstraDB MAY experiment with CXL in later research.
+CarolinaDB MAY experiment with CXL in later research.
 
 The core database MUST remain correct on ordinary commodity hardware.
 
@@ -3087,17 +3088,17 @@ DO:
 - keep protocol state atomic with business state when required
 
 DO NOT:
-- hide RocksDB under astra-storage as the production kernel
+- hide RocksDB under carolina-storage as the production kernel
 - use SQLite as the final engine
 - copy HeraclitusDB storage wholesale
-- put Raft inside astra-storage
+- put Raft inside carolina-storage
 - add SQL before local recovery is proven
 - add GPU/CXL/io_uring before the portable baseline
 - silently weaken durability
 - invent benchmark claims
 ```
 
-RocksDB, SQLite and PostgreSQL are valid baselines and test references. They are not substitutes for proving AstraDB's own transaction boundary.
+RocksDB, SQLite and PostgreSQL are valid baselines and test references. They are not substitutes for proving CarolinaDB's own transaction boundary.
 
 ---
 

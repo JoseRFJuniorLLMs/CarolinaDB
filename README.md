@@ -26,6 +26,36 @@ Typical workloads include inventory and reservations, quotas, credits, permits, 
 
 ---
 
+## Status
+
+**Research prototype.** The repository holds the specifications (`md/SPEC-001` … `SPEC-014`) and a Rust
+workspace that implements the first local vertical slice of [SPEC-014](md/SPEC-014.md):
+
+| Stage | State |
+|---|---|
+| MVP-0 semantic core (DSL, typed IR, reference interpreter, canonical artifacts) | implemented, tested |
+| MVP-1 conservative compiler (closure, obligations, counterexamples, certificate, checker, EXPLAIN) | implemented, tested |
+| MVP-2 local durable slice (B+Tree/MVCC/journal/checkpoint, CompiledBatch, RequestHome, receipts, resolve) | implemented, tested in-process (crash matrix, differential oracle, SPEC-014 §4 schedules) |
+| MVP-3 catalog + single-IDC C5 (three-voter Raft, catalog CAS/genesis/grants, `ASTR`/TCP node, ordered execution, real three-process fault campaign) | implemented, tested; `DEV_LOCAL` transport only — SPEC-013 mTLS not implemented |
+| MVP-4 … MVP-8 (multi-IDC publication, C1/C2, C3, evolution, C4) | not started |
+
+No distributed capability exists yet, no SPEC-010 qualification campaign has run, and no formal model
+gate (FM-1/2/3) has executed. `present in code != implemented capability != qualified capability`.
+The precise per-deliverable state, test evidence and recorded deviations live in
+[docs/STATUS.md](docs/STATUS.md).
+
+```bash
+cargo test --workspace
+cargo run -p carolina-cli -- workload ./data-demo
+cargo run -p carolina-cli -- qualify --quick --out qualification
+```
+
+The last command runs the SPEC-010 campaign and writes a manifest, verdict and report under
+`qualification/`. It claims gates Q0, Q1, Q2, FM (bounded models) and Q3-C5 (the single-IDC C5
+slice, including a three-process fault campaign); everything else is reported `NOT_RUN`.
+
+---
+
 ## Table of Contents
 
 - [Why CarolinaDB](#why-carolinadb)

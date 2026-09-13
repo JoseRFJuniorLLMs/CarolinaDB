@@ -1,0 +1,16 @@
+[package]
+name = "carolina-compiler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CarolinaDB coordination compiler: closure, candidate obligations, conservative plan selection, certificates and EXPLAIN (SPEC-004)"
+
+[dependencies]
+carolina-core.workspace = true
+carolina-lang.workspace = true
+
+[lints]
+workspace = true

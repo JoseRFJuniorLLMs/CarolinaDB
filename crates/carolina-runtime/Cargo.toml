@@ -1,0 +1,19 @@
+[package]
+name = "carolina-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CarolinaDB runtime: local request path (SPEC-014 MVP-2)"
+
+[dependencies]
+carolina-core.workspace = true
+carolina-lang.workspace = true
+carolina-compiler.workspace = true
+carolina-storage.workspace = true
+carolina-wire.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "carolina-consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CarolinaDB consensus adapter (SPEC-008 §5): deterministic Raft with fixed membership, persistent log, read barrier and a deterministic simulator"
+
+[dependencies]
+carolina-core.workspace = true
+crc32c.workspace = true
+
+[lints]
+workspace = true

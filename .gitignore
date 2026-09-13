@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+/qualification/**/run_*
+/tmp
+*.log
+.DS_Store

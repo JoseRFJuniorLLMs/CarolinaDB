@@ -8,7 +8,7 @@
 **Protocol interfaces:** [SPEC-005](SPEC-005.md), [SPEC-006](SPEC-006.md), [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md)
 **Qualification:** [SPEC-010](SPEC-010.md)
 **Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog and typed authority), [SPEC-012](SPEC-012.md) (request identity, receipts and codecs), [SPEC-013](SPEC-013.md) (security and trust)
-**Reference implementation:** Rust stable; certification in `astra-runtime`, outside `astra-storage`
+**Reference implementation:** Rust stable; certification in `carolina-runtime`, outside `carolina-storage`
 **Normative terms:** MUST, MUST NOT, SHOULD, SHOULD NOT and MAY express requirements on a conforming implementation.
 
 ---

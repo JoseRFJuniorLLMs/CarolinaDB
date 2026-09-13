@@ -1,0 +1,25 @@
+[package]
+name = "carolina-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CarolinaDB node process: ASTR transport, fixed three-voter consensus, catalog and the single-IDC C5 ordered executor (SPEC-014 MVP-3)"
+
+[dependencies]
+carolina-core.workspace = true
+carolina-lang.workspace = true
+carolina-storage.workspace = true
+carolina-wire.workspace = true
+carolina-runtime.workspace = true
+carolina-consensus.workspace = true
+carolina-catalog.workspace = true
+
+[[bin]]
+name = "carolina-node"
+path = "src/bin/carolina-node.rs"
+
+[lints]
+workspace = true

@@ -6,7 +6,7 @@
 **Depends on:** [SPEC-001](SPEC-001.md), [SPEC-002](SPEC-002.md), [SPEC-003](SPEC-003.md), [SPEC-004](SPEC-004.md), [SPEC-005](SPEC-005.md)
 **Integrates with:** [SPEC-008](SPEC-008.md), [SPEC-009](SPEC-009.md), [SPEC-010](SPEC-010.md)
 **Normative registries and protocols:** [SPEC-011](SPEC-011.md) (catalog and typed authority), [SPEC-012](SPEC-012.md) (request identity and codecs), [SPEC-013](SPEC-013.md) (security and trust)
-**Reference implementation:** Rust stable; initially an `astra-runtime` module
+**Reference implementation:** Rust stable; initially an `carolina-runtime` module
 **Normative terms:** MUST, MUST NOT, SHOULD and MAY define requirements of this draft.
 
 ## 1. Decision
@@ -365,7 +365,7 @@ Finite configurable limits SHALL bound active reservations, outgoing/incoming tr
 
 Required measurements include usable rights by logical holder; active reservations; outgoing prepared/committed transfers; accepted/applied incoming transfers; rights production/consumption; transfer duration and retries; starvation; local exhaustion; frozen quantity and missing evidence; authority/decision durability waits and policy hashes; reconciliation duration; blocked migrations; retained ledger bytes; and active plan/resource/allocation/authority generations.
 
-Metrics MUST distinguish approximate replica gauges from authoritative reconciled accounting. The tool `astra rights inspect <resource>` SHOULD show T/C/H/U/X only when its collected cut is complete; otherwise it reports missing holders and partial observations explicitly. It MUST NOT present a sum of stale replicas as a conservation proof.
+Metrics MUST distinguish approximate replica gauges from authoritative reconciled accounting. The tool `carolina rights inspect <resource>` SHOULD show T/C/H/U/X only when its collected cut is complete; otherwise it reports missing holders and partial observations explicitly. It MUST NOT present a sum of stale replicas as a conservation proof.
 
 Traces contain request ID, origin ID, transfer/reservation ID, terms hash, resource/authority generation, durable decision stage and local journal boundary. User values and credentials are omitted by default. High-cardinality resource details use bounded diagnostics. Rebalancing cost and coordination outside the consume fast path must be measured in SPEC-010 evaluations.
 
