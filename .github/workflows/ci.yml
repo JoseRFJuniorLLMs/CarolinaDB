@@ -15,16 +15,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo +nightly install cargo-audit --version 0.22.2 --locked
+      - run: cargo +nightly audit --deny warnings
 
   spec-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: python -m unittest discover -s tools -p "test_*.py" -v
@@ -34,11 +34,11 @@ jobs:
   model-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -52,7 +52,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         toolchain: ["1.89.0", stable]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -73,13 +73,13 @@ jobs:
   fuzz-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - run: cargo install cargo-fuzz --version 0.13.2 --locked
-      - run: cargo fuzz run dsl_frontend -- -runs=256
-      - run: cargo fuzz run canonical_artifacts -- -runs=256
-      - run: cargo fuzz run wire_protocol -- -runs=256
-      - run: cargo fuzz run storage_formats -- -runs=256
+      - run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
+      - run: cargo +nightly fuzz run dsl_frontend -- -runs=256
+      - run: cargo +nightly fuzz run canonical_artifacts -- -runs=256
+      - run: cargo +nightly fuzz run wire_protocol -- -runs=256
+      - run: cargo +nightly fuzz run storage_formats -- -runs=256

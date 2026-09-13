@@ -52,8 +52,9 @@ cargo build -p carolina-node --locked
 cargo run -p carolina-cli -- qualify --quick --out target/qualification
 ```
 
-`cargo audit --no-fetch` uses the locally available RustSec advisory database. CI runs
-`rustsec/audit-check` with an updated advisory database on every push and pull request.
+`cargo audit --no-fetch` uses the locally available RustSec advisory database. CI installs the
+pinned cargo-audit 0.22.2 with nightly Rust and refreshes the advisory database on every push and
+pull request. The audit toolchain is separate from the project's Rust 1.89 MSRV build.
 
 `tools/run_tlc.py` requires Java 17. It downloads TLA+ tools v1.8.0 only when absent,
 verifies the pinned SHA-256 digest, and checks FM-1, FM-2 and FM-3 with their bounded configs.
