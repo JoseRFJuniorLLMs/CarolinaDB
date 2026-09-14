@@ -297,7 +297,7 @@ pub fn three_process_c5(binary: &Path, root: &Path) -> Result<C5Summary, String>
         p.start()?;
     }
     let mut summary = C5Summary::default();
-    let leader = wait_leader(&procs, cluster_id, Duration::from_secs(60))
+    wait_leader(&procs, cluster_id, Duration::from_secs(60))
         .ok_or("cluster did not bootstrap (genesis, grant, route) within 60s")?;
     summary
         .checks
@@ -305,8 +305,6 @@ pub fn three_process_c5(binary: &Path, root: &Path) -> Result<C5Summary, String>
     let cat = LocalCatalog::from_source(fixture_source("inventory_reserve_release").unwrap())
         .map_err(|e| e.to_string())?;
     {
-        let mut c =
-            connect(&procs[leader], cluster_id, EndpointRole::Admin).ok_or("connect admin")?;
         let rows = vec![(
             Value::Uuid(ITEM),
             vec![
@@ -316,11 +314,44 @@ pub fn three_process_c5(binary: &Path, root: &Path) -> Result<C5Summary, String>
                 ("total".to_string(), Value::I64(10)),
             ],
         )];
-        match c.seed("seed-1", "Item", rows).map_err(|e| e.to_string())? {
-            AdminReply::Seeded { .. } => {}
-            other => return Err(format!("seed: {other:?}")),
-        }
+        // Leadership can move between `wait_leader` answering and this command reaching the log,
+        // and a loaded machine makes that likely. `LeadershipLost`/`NotLeader` is a transient
+        // refusal, not a verdict: retry it on the current leader. The admin request id makes the
+        // retry safe — identical content coalesces onto one result, changed content is refused
+        // with `IdentityConflict` instead of being applied twice (SPEC-011 §8).
+        let start = Instant::now();
+        let mut last = String::new();
+        let seeded = loop {
+            if start.elapsed() >= Duration::from_secs(60) {
+                break false;
+            }
+            let Some(l) = wait_leader(&procs, cluster_id, Duration::from_secs(30)) else {
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            };
+            let Some(mut c) = connect(&procs[l], cluster_id, EndpointRole::Admin) else {
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            };
+            match c.seed("seed-1", "Item", rows.clone()) {
+                Ok(AdminReply::Seeded { .. }) => break true,
+                Ok(AdminReply::Refused { code, .. })
+                    if code == "LeadershipLost" || code == "NotLeader" =>
+                {
+                    last = code;
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Ok(other) => return Err(format!("seed: {other:?}")),
+                Err(e) => {
+                    last = e.to_string();
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        };
+        ensure!(seeded, "seed did not commit within 60s: last {last}");
     }
+    let leader = wait_leader(&procs, cluster_id, Duration::from_secs(30))
+        .ok_or("no stable leader after seed")?;
     let inv1 = reserve(&cat, "r1", 3, 1);
     let r1 = committed(&invoke_via_leader(
         &procs,

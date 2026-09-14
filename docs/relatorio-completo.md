@@ -31,7 +31,7 @@ Validação local executada em Windows 11 com Rust 1.89.0, a MSRV fixada:
 | `cargo audit --file Cargo.lock --no-fetch` | PASS — 25 dependências contra 1.216 advisories em cache; nenhum achado |
 | `cargo fuzz check` | PASS — quatro harnesses coverage-guided compilam; execução local bloqueada pelo linker do sanitizer no Windows e delegada ao CI Linux |
 | `python tools/run_tlc.py` | PASS — FM-1/2/3; 3.268/348/2.816 estados distintos; nenhuma violação |
-| GitHub Actions | PASS — [run 34777875153](https://github.com/JoseRFJuniorLLMs/CarolinaDB/actions/runs/34777875153); oito jobs; Rust 1.89.0 + stable em Linux + Windows |
+| GitHub Actions | PASS — [run 34811627120](https://github.com/JoseRFJuniorLLMs/CarolinaDB/actions/runs/34811627120) para `28c23ec`; oito jobs; Rust 1.89.0 + stable em Linux + Windows |
 
 Bundle retido da campanha rápida:
 
@@ -60,6 +60,7 @@ A auditoria recursiva encontrou e corrigiu falhas que a suíte anterior não exe
 - grants que autorizavam apenas por `OperationId`, herdando implicitamente versões futuras, agora vinculados ao `OperationRef` completo;
 - identidade interna de `PermissionGrant` diferente da chave imutável sob a qual era instalada;
 - campanha C5 que tratava `Unavailable` como prova de aborto e comparava a recuperação com um digest anterior a uma admissão indeterminada;
+- campanha C5 que não repetia o seed administrativo quando a liderança mudava entre a descoberta do líder e a proposta;
 - identidade de requisições C5 simultâneas com a mesma chave e conteúdo diferente;
 - finalização autônoma de admissões herdadas após troca de líder;
 - publicação de `ResolveRequest` somente depois da decisão replicada;
@@ -109,7 +110,7 @@ A leitura correta é:
 - **Segurança de produção:** ausente.
 - **Operação de produção:** incompleta.
 - **Release engineering:** incompleta.
-- **Evidência pública de CI:** verde para o commit funcional `618cd0e`.
+- **Evidência pública de CI:** verde para o commit auditado `28c23ec`.
 
 Portanto existem dois objetivos possíveis, que não devem ser confundidos:
 
