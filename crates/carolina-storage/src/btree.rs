@@ -401,6 +401,17 @@ impl BTree {
                 "value exceeds MAX_VALUE_LEN",
             ));
         }
+        // The duplicate check runs BEFORE any overflow chain is written. Writing first and
+        // discovering the duplicate afterwards abandons those pages: they are unreachable from the
+        // root, so no copy-on-write checkpoint writes them and no eviction reclaims them (dirty
+        // frames are never evicted), and `dirty_count()` never returns to zero again — which is
+        // exactly the condition the checkpoint uses to decide the image is complete, so journal
+        // retention would stop advancing for the life of the store (SPEC-002 §105).
+        // Only an overflowing value allocates before the check, so only it pays for the extra
+        // descent; an inline value still allocates nothing until after the duplicate scan below.
+        if value.len() > MAX_INLINE_VALUE && self.find_version(ctx, key, seq)? {
+            return Ok(false);
+        }
         let (flags, stored_value) = if value.len() > MAX_INLINE_VALUE {
             let first = self.write_overflow(ctx, value)?;
             let mut v = Vec::with_capacity(12);
@@ -419,9 +430,10 @@ impl BTree {
             value: stored_value,
         };
         let enc = entry.encode();
+        // Descend (again, for an overflowing value): writing the chain may have evicted the leaf,
+        // so neither the frame index nor the pool position from the check above can be reused.
         let path = self.descend(ctx, key, seq)?;
         let (leaf, _) = *path.last().unwrap();
-        // locate insert position and check duplicates
         let (fi, pool) = Self::fetch(ctx, leaf)?;
         let page = &pool.frame(fi).bytes[..];
         let n = slot_count(page);
@@ -463,6 +475,24 @@ impl BTree {
         records.insert(pos, enc);
         self.rewrite_or_split(ctx, &path, records)?;
         Ok(true)
+    }
+
+    /// Is `(key, seq)` already present? Used before allocating anything for the new version, so a
+    /// refused insert cannot leave pages behind.
+    fn find_version(&mut self, ctx: &mut TreeCtx, key: &[u8], seq: u64) -> CoreResult<bool> {
+        let path = self.descend(ctx, key, seq)?;
+        let (leaf, _) = *path.last().unwrap();
+        let (fi, pool) = Self::fetch(ctx, leaf)?;
+        let page = &pool.frame(fi).bytes[..];
+        for i in 0..slot_count(page) {
+            let e = LeafEntry::decode(record(page, i)?)?;
+            match leaf_cmp(&e.key, e.seq, key, seq) {
+                std::cmp::Ordering::Equal => return Ok(true),
+                std::cmp::Ordering::Greater => return Ok(false),
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        Ok(false)
     }
 
     fn rewrite_or_split(

@@ -264,6 +264,14 @@ pub struct Metrics {
     pub journal_retained_bytes: u64,
     /// Oldest sequence any registered snapshot may still read (the GC horizon).
     pub oldest_snapshot_seq: u64,
+    /// Checkpoints that finished with the buffer pool still dirty, so the persisted image was
+    /// incomplete and journal retention could not advance (SPEC-002 §105).
+    ///
+    /// A successful checkpoint writes every page reachable from the root, so any value above zero
+    /// means some dirty page is *unreachable* — nothing will ever write it and nothing will ever
+    /// evict it, and retention is stalled for the life of the store. It is a defect signal, not a
+    /// tuning knob.
+    pub checkpoint_image_incomplete_total: u64,
 }
 
 pub struct Store {
@@ -1565,6 +1573,9 @@ impl DurableStorageKernel for Store {
         // Safety belt: only advance the retention point when the persisted image is complete,
         // i.e. the pool holds no dirty page the checkpoint failed to write.
         let image_complete = self.pool.dirty_count() == 0;
+        if !image_complete {
+            self.metrics.checkpoint_image_incomplete_total += 1;
+        }
         let first_needed = if self.opts.reclaim_at_checkpoint && image_complete {
             self.journal.first_needed_segment(checkpoint_lsn)?
         } else {

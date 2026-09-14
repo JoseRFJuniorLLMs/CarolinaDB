@@ -509,3 +509,67 @@ fn checkpoint_reclaims_journal_segments_but_prepared_work_pins_them() {
     s.verify(VerifyMode::Full).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// SPEC-002 §84/§105: a prepared transaction pins the journal, so `checkpoint_lsn` is clamped below
+/// its frame while the persisted image already holds every later commit. Recovery therefore replays
+/// commits that are *already* in the image — the redo path is explicitly idempotent by `(key, seq)`.
+/// A replayed commit whose value overflows must not allocate the overflow chain before it discovers
+/// the duplicate: the abandoned chain is unreachable from the root, so no checkpoint writes it and
+/// no eviction reclaims it, the pool never becomes clean again, and journal retention — which only
+/// advances when the image is complete — silently stops for the life of the store.
+#[test]
+fn replaying_a_committed_overflow_value_leaves_the_image_completable() {
+    let dir = temp_dir("kernel-replay-overflow");
+    let big = vec![0x5Au8; 16 * 1024];
+    let mut o = opts();
+    o.reclaim_at_checkpoint = true;
+    {
+        let mut s = Store::create(&dir, o.clone()).unwrap();
+        // a prepared transaction pins the journal below every later commit
+        s.prepare(prepare_batch(
+            900,
+            &[(user_key(9, 1), b"prepared".to_vec())],
+        ))
+        .unwrap();
+        // commits after it, with values that need overflow chains
+        for i in 1..=8u64 {
+            s.commit(batch(i, &[(user_key(1, i), big.clone())], &[], true))
+                .unwrap();
+        }
+        // the image holds all eight, but checkpoint_lsn stays below the prepared frame
+        s.checkpoint().unwrap();
+    }
+    // recovery replays all eight commits against an image that already contains them
+    let mut s = Store::open(&dir, o).unwrap();
+    // the undecided transaction is in doubt, exactly as P9 requires
+    assert_eq!(s.readiness(), Readiness::WaitingProtocolReconciliation);
+    assert_eq!(
+        s.metrics.recovery_replayed_batches, 8,
+        "the clamped checkpoint must force the commits to be replayed"
+    );
+    let snap = s.snapshot();
+    assert_eq!(s.get(&user_key(1, 3), snap).unwrap(), Some(big.clone()));
+    s.release_snapshot(snap);
+    s.verify(VerifyMode::Full).unwrap();
+
+    // decide it so the store is writable again, then check that the replay left nothing
+    // unreachable behind: a completable image is the precondition journal retention needs
+    let in_doubt = s.in_doubt();
+    assert_eq!(in_doubt.len(), 1);
+    s.abort_prepared(
+        in_doubt[0].clone(),
+        AbortDecision {
+            decision_ref: decision_ref(900),
+        },
+    )
+    .unwrap();
+    assert_eq!(s.readiness(), Readiness::Ready);
+    s.commit(batch(50, &[(user_key(2, 1), b"after".to_vec())], &[], true))
+        .unwrap();
+    s.checkpoint().unwrap();
+    assert_eq!(
+        s.metrics.checkpoint_image_incomplete_total, 0,
+        "the checkpoint could not write every dirty page: retention is stalled for good"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
