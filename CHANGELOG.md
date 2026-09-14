@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-09-14
 
 The first vertical slice of [SPEC-014](md/SPEC-014.md): the semantic core, the conservative
 compiler, the local durable slice, and a single-IDC C5 slice running as three real processes.
