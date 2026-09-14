@@ -1,9 +1,9 @@
 # Security Policy
 
-CarolinaDB is a research prototype. It has no production deployment profile, no transport
-security implementation yet (SPEC-013 is specified, not implemented) and no security
-qualification evidence. Do not expose a CarolinaDB data directory or process to untrusted input
-outside an isolated test environment.
+CarolinaDB is a research prototype. Its catalog and node enforce the non-cryptographic
+authorization subset recorded by `QI-AUTHZ`, but it has no production deployment profile,
+authenticated transport, credential system or cryptographic security qualification. Do not expose
+a CarolinaDB data directory or process to untrusted input outside an isolated test environment.
 
 ## Reporting
 

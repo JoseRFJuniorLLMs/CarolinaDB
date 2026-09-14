@@ -36,7 +36,7 @@ workspace that implements the first local vertical slice of [SPEC-014](md/SPEC-0
 | MVP-0 semantic core (DSL, typed IR, reference interpreter, canonical artifacts) | implemented, tested |
 | MVP-1 conservative compiler (closure, obligations, counterexamples, certificate, checker, EXPLAIN) | implemented, tested |
 | MVP-2 local durable slice (B+Tree/MVCC/journal/checkpoint, CompiledBatch, RequestHome, receipts, resolve) | implemented, tested in-process (crash matrix, differential oracle, SPEC-014 §4 schedules) |
-| MVP-3 catalog + single-IDC C5 (three-voter Raft, catalog CAS/genesis/grants, `ASTR`/TCP node, ordered execution, real three-process fault campaign) | implemented, tested for the plaintext `DEV_LOCAL` loopback profile (gates Q3-C5, QI-CATALOG, QI-CODEC-CORPUS PASS); the SPEC-014 §3 exit criteria are **not** met because SPEC-013 mTLS/authorization is not implemented (QI-SECURITY NOT_RUN) |
+| MVP-3 catalog + single-IDC C5 (three-voter Raft, catalog CAS/genesis/grants, `ASTR`/TCP node, ordered execution, real three-process fault campaign) | implemented, tested for the plaintext `DEV_LOCAL` loopback profile (gates Q3-C5, QI-CATALOG, QI-CODEC-CORPUS and QI-AUTHZ PASS); the SPEC-014 §3 exit criteria are **not** met because SPEC-013 mTLS, credential authentication and cryptographic profiles are not implemented (QI-SECURITY NOT_RUN) |
 | MVP-4 … MVP-8 (multi-IDC publication, C1/C2, C3, evolution, C4) | not started; their formal models FM-1/2/3 pass within explicit bounds, which is model evidence only |
 
 The only distributed capability is the single-IDC C5 slice above; multi-IDC atomicity, C1/C2, C3 and
@@ -981,9 +981,10 @@ Equal numeric payloads do not make two epoch types interchangeable.
 
 # Security Model
 
-> **Design, not implementation.** None of the mechanisms in this section exists in the code yet.
-> The node speaks only the plaintext, loopback-only `DEV_LOCAL` profile, its endpoint roles are
-> unauthenticated declarations, and the qualification gate `QI-SECURITY` is `NOT_RUN`. See
+> **Partially implemented.** Exact principal/tenant/namespace/operation authorization and current
+> resolve authorization pass `QI-AUTHZ`. The node still speaks only the plaintext, loopback-only
+> `DEV_LOCAL` profile, its endpoint roles are unauthenticated declarations, and the cryptographic
+> qualification gate `QI-SECURITY` is `NOT_RUN`. See
 > [SECURITY.md](SECURITY.md) and [docs/AUDIT.md](docs/AUDIT.md) (SPEC-013 section).
 
 CarolinaDB v1 assumes authenticated, authorized, non-Byzantine admitted infrastructure members.

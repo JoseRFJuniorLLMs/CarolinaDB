@@ -84,6 +84,45 @@ The C5 process campaign finds `carolina-node` next to the runner or through the
 tree and profile. The campaign launches three loopback processes in isolated scratch
 directories, kills/restarts those processes and verifies retained request results.
 
+## Running a cluster by hand
+
+The qualification campaign builds and tears down its own three-process cluster. To keep one
+running, write three node configurations and start the binary once per voter. A configuration is
+canonical JSON produced by `NodeConfig::encode`; the practical way to obtain one is to construct
+`carolina_node::config::NodeConfig` in a small program of your own and write `cfg.encode()` — the
+manifest fields are derived identities, not free text, so hand-writing the file is impractical.
+
+The manifest must name exactly three distinct voters, every address must be numeric loopback with a
+fixed nonzero port, and `security_profile` must be `DEV_LOCAL`.
+
+```sh
+carolina-node --config alpha.json &
+carolina-node --config beta.json &
+carolina-node --config gamma.json &
+carolina node status --addr 127.0.0.1:7301 --cluster <label>
+```
+
+`--cluster` takes the **label** the configuration's `cluster_id` was derived from, not the derived
+identity; the default is `carolina`. A mismatch closes the connection during negotiation, which is
+reported as `connection closed during negotiation`, not as a wrong-cluster error.
+
+The three voters bootstrap themselves through the log (genesis, home grant, request route). Once a
+leader reports `Ready`, an admin endpoint can seed rows and a client endpoint can invoke. Only the
+hardcoded tenant `tenant-c5` and principal `dev-local-client` are granted: see the tenancy row in
+[STATUS.md](STATUS.md).
+
+## Linux and WSL
+
+Linux is a supported build target and CI tests it. Under WSL, build inside the Linux filesystem
+(`~/carolinadb`), not under `/mnt/...` — the Windows drive is reached over a translation layer that
+makes both compilation and the storage kernel's fsync-heavy tests far slower, and the timing of the
+crash matrix is not something to run over it. Copy the tree in and build there:
+
+```sh
+tar --exclude=./target --exclude=./.git -cf - . | tar -xf - -C ~/carolinadb
+cd ~/carolinadb && cargo test --workspace --locked
+```
+
 ## Scope
 
 The network profile is DEV_LOCAL: numeric loopback endpoints, three distinct pinned
