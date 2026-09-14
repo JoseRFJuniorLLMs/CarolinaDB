@@ -199,7 +199,11 @@ suite run real processes and real fsync and take about two minutes together.
 | `.github/workflows/ci.yml` (RustSec audit, spec lint, bounded TLC, fmt, clippy `-D warnings`, tests, quick qualification campaign, four libFuzzer smoke targets; Rust 1.89 + stable on Linux + Windows) | ✅ [run 34811627120](https://github.com/JoseRFJuniorLLMs/CarolinaDB/actions/runs/34811627120) green for audited main commit `28c23ec`; all eight jobs passed |
 | `SECURITY.md` | ✅ |
 | `docs/BUILD.md` (build, test, qualification campaign, three-node cluster, troubleshooting) | ✅ |
-| SBOM, signed releases, reproducible-build configuration, release manifest | ⬜ |
+| `CHANGELOG.md` (what 0.1.0 is, what it is not, the gates, the defects found while qualifying it) | ✅ |
+| `sbom.json` (CycloneDX 1.5, generated from `Cargo.lock` by `tools/make_sbom.py`): 25 components, 13 third-party, every licence determined from the vendored source of that exact version and all MIT/Apache-2.0. `--check` validates the committed document against `Cargo.lock` rather than re-rendering it, so a checkout that has not built yet does not fail for the wrong reason | ✅ CI job `release-artifacts`; negative control exercised (dropping a component fails the check) |
+| Reproducible release build: `tools/build_release.py` remaps the source tree, the cargo home and the toolchain sysroot, and `--verify` builds the committed tree twice from differently named directories and compares the artifacts. This was **measured, not assumed** — it failed first, because `carolina` baked `CARGO_MANIFEST_DIR` into the binary | ✅ CI job `release-artifacts` |
+| Signed releases and a release manifest | ⬜ signing needs a key, which is an owner decision |
+| `ARCHITECTURE-FREEZE-0.1.md` | ⬜ blocked on two owner decisions: the `CodecManifest` is incomplete (15 registered kinds have no implemented codec) and the security profile is unresolved because SPEC-013 needs a TLS dependency that has not been chosen |
 
 ## Known deviations and decisions
 

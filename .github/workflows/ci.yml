@@ -70,6 +70,39 @@ jobs:
           path: qualification
           if-no-files-found: ignore
 
+  proofs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: install the pinned Lean toolchain
+        run: |
+          curl -sSfL https://elan.lean-lang.org/elan-init.sh -o elan-init.sh
+          sh elan-init.sh -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: check the proofs and audit their axioms
+        run: python tools/run_lean.py
+
+  release-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89.0"
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # the registry has to be populated before licences can be read from vendored sources
+      - run: cargo fetch --locked
+      - name: the SBOM matches Cargo.lock
+        run: python tools/make_sbom.py --check
+      - name: the release build is reproducible across source paths
+        run: python tools/build_release.py --verify
+
   fuzz-smoke:
     runs-on: ubuntu-latest
     steps:
