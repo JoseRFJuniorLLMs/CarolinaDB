@@ -7,7 +7,8 @@
 //! Checks (SPEC-008 §20 subset):
 //! * C5-001 — results match the sequential contract (a reserve commits once with the exact result);
 //! * C5-010 — an exact duplicate returns byte-identical bytes; changed payload under one key is refused;
-//! * C5-009 — a follower refuses mutations; a minority survivor cannot admit;
+//! * C5-009 — a follower refuses mutations; a minority survivor cannot acknowledge a final
+//!   mutation, and any indeterminate attempt is resolved after quorum recovery;
 //! * C5-021 — leader killed after admissions: a new leader continues the same home epoch and
 //!   allocation counter, and `ResolveRequest` by `RequestKey` returns the original receipt;
 //! * replicated determinism — a restarted voter replays the log and reports the same state digest
@@ -353,6 +354,40 @@ pub fn three_process_c5(binary: &Path, root: &Path) -> Result<C5Summary, String>
     summary
         .checks
         .push("C5-010: changed payload under a bound key refused".into());
+
+    // SPEC-013 §4: the tenant and the full operation version are permission boundaries. These
+    // requests have valid canonical hashes, so only authorization can refuse them before binding.
+    let mut foreign_tenant = reserve(&cat, "auth-foreign-tenant", 1, 3);
+    foreign_tenant.content.request_key.tenant_id = TenantId::derive("foreign-tenant");
+    foreign_tenant.request_hash = foreign_tenant.content.request_hash();
+    let mut authz_client = connect(&procs[leader], cluster_id, EndpointRole::Client)
+        .ok_or("connect authorization client")?;
+    ensure!(
+        matches!(
+            authz_client
+                .invoke(&foreign_tenant)
+                .map_err(|e| e.to_string())?,
+            ClientReplyV1::Unavailable(RefusalV1 { code, possibly_admitted: false, .. })
+                if code == "AuthorizationDenied"
+        ),
+        "SEC-02: foreign tenant was not denied before admission"
+    );
+    let mut foreign_version = reserve(&cat, "auth-foreign-version", 1, 4);
+    foreign_version.content.operation.version += 1;
+    foreign_version.request_hash = foreign_version.content.request_hash();
+    ensure!(
+        matches!(
+            authz_client
+                .invoke(&foreign_version)
+                .map_err(|e| e.to_string())?,
+            ClientReplyV1::Unavailable(RefusalV1 { code, possibly_admitted: false, .. })
+                if code == "AuthorizationDenied"
+        ),
+        "SEC-02: ungranted operation version was not denied before admission"
+    );
+    summary.checks.push(
+        "SEC-02: foreign tenant and ungranted operation version denied before admission".into(),
+    );
     let follower = (0..3).find(|i| *i != leader).unwrap();
     {
         let mut c = connect(&procs[follower], cluster_id, EndpointRole::Client)
@@ -451,7 +486,7 @@ pub fn three_process_c5(binary: &Path, root: &Path) -> Result<C5Summary, String>
     summary
         .metrics
         .insert("applied_index".into(), target.applied_index);
-    // minority cannot serve
+    // A minority cannot acknowledge a final mutation.
     let l = wait_leader(&procs, cluster_id, Duration::from_secs(30)).ok_or("no leader")?;
     let others: Vec<usize> = (0..3).filter(|i| *i != l).collect();
     for i in &others {
@@ -459,14 +494,15 @@ pub fn three_process_c5(binary: &Path, root: &Path) -> Result<C5Summary, String>
     }
     std::thread::sleep(Duration::from_millis(2500));
     let mut c = connect(&procs[l], cluster_id, EndpointRole::Client).ok_or("connect survivor")?;
-    let reply = c.invoke(&reserve(&cat, "r-minority", 1, 5));
+    let minority_inv = reserve(&cat, "r-minority", 1, 5);
+    let reply = c.invoke(&minority_inv);
     ensure!(
         matches!(reply, Ok(ClientReplyV1::Unavailable(_)) | Err(_)),
-        "C5-009: a minority survivor admitted a mutation: {reply:?}"
+        "C5-009: a minority survivor acknowledged a final mutation: {reply:?}"
     );
     summary
         .checks
-        .push("C5-009: a minority survivor cannot admit".into());
+        .push("C5-009: a minority survivor cannot acknowledge a final mutation".into());
 
     // The whole cluster goes down and comes back. A voter that restarts before its first snapshot
     // rebuilds its catalog by replaying the log, so the leader elected out of a cold start sees an
@@ -480,6 +516,26 @@ pub fn three_process_c5(binary: &Path, root: &Path) -> Result<C5Summary, String>
     }
     wait_leader(&procs, cluster_id, Duration::from_secs(90))
         .ok_or("cold restart: the cluster did not elect a leader again")?;
+
+    // The isolated leader may have appended the attempt before discovering that it lacked a
+    // quorum. `Unavailable` is not abort evidence: once the quorum returns, that suffix is either
+    // committed or replaced. Resolve it through a read barrier before choosing the convergence
+    // target, otherwise a legal later commit looks like divergent replay.
+    match resolve_via_leader(&procs, cluster_id, &minority_inv, Duration::from_secs(60))? {
+        ResolveReplyV1::Terminal(_) | ResolveReplyV1::AbsentAtBarrier { .. } => {}
+        other => {
+            return Err(format!(
+                "minority attempt did not resolve after recovery: {other:?}"
+            ))
+        }
+    }
+    let recovered_leader = wait_leader(&procs, cluster_id, Duration::from_secs(30))
+        .ok_or("cold restart: no stable leader after resolving minority attempt")?;
+    let target = {
+        let mut c = connect(&procs[recovered_leader], cluster_id, EndpointRole::Admin)
+            .ok_or("cold restart: connect leader status")?;
+        c.status().map_err(|e| e.to_string())?
+    };
     // A voter that has not yet applied genesis refuses every admin request, `Status` included, so
     // the state of a recovering cluster has to be polled until it converges rather than sampled
     // once. A voter that fails closed after genesis still answers and reports it, which is why
@@ -529,8 +585,11 @@ pub fn three_process_c5(binary: &Path, root: &Path) -> Result<C5Summary, String>
         other => return Err(format!("cold restart: resolve: {other:?}")),
     }
     summary.metrics.insert("cold_restarts".into(), 1);
+    summary
+        .metrics
+        .insert("applied_index".into(), target.applied_index);
     summary.checks.push(
-        "cold restart: every voter down and back; no second bootstrap, one state digest, the original receipt still resolves"
+        "cold restart: every voter down and back; indeterminate minority attempt resolved, no second bootstrap, one state digest, the original receipt still resolves"
             .into(),
     );
 

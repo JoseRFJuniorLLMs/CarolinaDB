@@ -285,7 +285,7 @@ pub fn build_manifest(
                 "MVP-4 not started".into(),
             ),
             (
-                "mTLS/authorization (SPEC-013)".into(),
+                "mTLS, credential authentication and cryptographic profiles (SPEC-013)".into(),
                 "not implemented; DEV_LOCAL only".into(),
             ),
             (
@@ -932,7 +932,7 @@ pub fn run_campaign(cfg: &CampaignConfig) -> Result<CampaignReport, ConfigError>
     ));
     run_check!(cfg, checks, "QI-AUTHZ", CheckResult::from_result(
         "QI-AUTHZ",
-        "catalog principal enforcement, exact tenant/namespace/operation grants, current authorization on resolve and atomic denial of privileged mutations",
+        "catalog principal enforcement, exact tenant/namespace/operation-version grants, current authorization on resolve and atomic denial of privileged mutations",
         carolina_catalog::authorization_campaign(),
         |passed| format!("{} authorization schedules held: {}", passed.len(), passed.join(" | ")),
     ));
