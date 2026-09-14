@@ -367,13 +367,27 @@ fn validate_flags(args: &[String], values: &[&str], switches: &[&str]) -> Result
     Ok(())
 }
 
+/// Where the repository data the campaigns read (`fixtures/`, `models/`) lives.
+///
+/// Discovered at run time, never at compile time. Baking `CARGO_MANIFEST_DIR` into the binary put
+/// the absolute path of the build machine inside every release artifact: it made the build
+/// unreproducible (two checkouts in different directories produced different bytes) and it pointed
+/// at a directory that exists on no other machine. `CAROLINA_REPO_ROOT` overrides; otherwise the
+/// nearest ancestor of the working directory that actually holds `fixtures/` wins.
 fn repo_root() -> PathBuf {
-    // the binary may run from anywhere: prefer the compile-time workspace, fall back to cwd
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    if p.join("fixtures").is_dir() {
-        p
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    if let Some(explicit) = std::env::var_os("CAROLINA_REPO_ROOT") {
+        return PathBuf::from(explicit);
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut here: &Path = cwd.as_path();
+    loop {
+        if here.join("fixtures").is_dir() {
+            return here.to_path_buf();
+        }
+        match here.parent() {
+            Some(up) => here = up,
+            None => return cwd,
+        }
     }
 }
 
