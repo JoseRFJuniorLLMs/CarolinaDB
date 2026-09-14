@@ -4,11 +4,11 @@
 
 **Branch auditada:** `main`
 
-**Commit funcional auditado:** `618cd0e42bd42ac5a9218343befd4a3581470b0b`
+**Commit funcional auditado:** `47bcaf6996fabd80317984cd5142d612575c2a88`
 
-**Árvore auditada:** branch `main` após as correções consolidadas em 13/09/2026
+**Árvore auditada:** branch `main` após as correções consolidadas em 14/09/2026
 
-**Data:** 13 de setembro de 2026
+**Data:** 14 de setembro de 2026
 **Arquivo:** `relatorio-completo.md`
 
 ---
@@ -24,7 +24,7 @@ Validação local executada em Windows 11 com Rust 1.89.0, a MSRV fixada:
 |---|---|
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --workspace --all-targets --offline --target-dir target -- -D warnings` | PASS |
-| `cargo test --workspace --offline --target-dir target` | PASS — 181 testes; 0 falhas; 0 ignorados; repetido na MSRV 1.89.0 |
+| `cargo test --workspace --locked` | PASS — 189 testes; 0 falhas; 0 ignorados |
 | `python tools/test_spec_lint.py` | PASS — 2 testes |
 | `python tools/spec_lint.py` | PASS — 16 arquivos; 0 erros; 0 warnings |
 | `carolina qualify --quick` | PASS para todos os gates reivindicados |
@@ -36,8 +36,8 @@ Validação local executada em Windows 11 com Rust 1.89.0, a MSRV fixada:
 Bundle retido da campanha rápida:
 
 ```text
-target/qualification-msrv/final/local-quick/run-34dfbaf40a573267
-manifest eefe377be0ff79d6f811f5f01028259d7ca3b2f51a01f616e3fc25ac31b519f3
+target/qualification-spec013-final/local-quick/run-02963a916c772d26
+manifest d36dfe64f7ac7f9816096691da768d3d9fbac984c91496159ea724ebe8c95321
 trace    85731071253a5f21f901242413e009cb0f36e9cdb5ab7f33b1c03426cdbad078
 ```
 
@@ -47,7 +47,7 @@ gates não reivindicados em sucesso.
 
 | Gate não reivindicado | Estado | Motivo |
 |---|---|---|
-| QI | NOT_RUN | QI-SECURITY não executado; mTLS/autorização ausentes |
+| QI | NOT_RUN | QI-SECURITY não executado; mTLS, autenticação por credencial e perfis criptográficos ausentes. A autorização não criptográfica é avaliada separadamente por QI-AUTHZ PASS |
 | Q3 | NOT_RUN | C1/C2/C3 não implementados |
 | Q4 | NOT_RUN | publicação atômica multi-IDC não implementada |
 | Q5 | NOT_RUN | evolução/migração não implementada |
@@ -56,6 +56,10 @@ gates não reivindicados em sucesso.
 
 A auditoria recursiva encontrou e corrigiu falhas que a suíte anterior não exercitava:
 
+- divulgação de recibo pelo caminho de retry de `Invoke` antes da autorização do principal atual;
+- grants que autorizavam apenas por `OperationId`, herdando implicitamente versões futuras, agora vinculados ao `OperationRef` completo;
+- identidade interna de `PermissionGrant` diferente da chave imutável sob a qual era instalada;
+- campanha C5 que tratava `Unavailable` como prova de aborto e comparava a recuperação com um digest anterior a uma admissão indeterminada;
 - identidade de requisições C5 simultâneas com a mesma chave e conteúdo diferente;
 - finalização autônoma de admissões herdadas após troca de líder;
 - publicação de `ResolveRequest` somente depois da decisão replicada;
