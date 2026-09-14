@@ -265,3 +265,32 @@ fn node_status_accepts_its_subcommand_and_still_rejects_bad_options() {
         );
     }
 }
+
+/// A binary release ships the two executables and the documents, not the repository's `fixtures/`.
+/// Running the campaign without them used to execute anyway and report `overall FAIL` with "golden
+/// bytes missing", which reads as "the database is broken" rather than "this command needs the
+/// repository". It must be a configuration error (exit 2) naming what is absent.
+#[test]
+fn qualification_refuses_clearly_when_the_repository_data_is_absent() {
+    let scratch = std::env::temp_dir().join(format!("carolina-norepo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    let output = command()
+        .arg("qualify")
+        .arg("--quick")
+        .current_dir(&scratch)
+        .env("CAROLINA_REPO_ROOT", &scratch)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("fixtures"),
+        "the refusal must name what is missing: {stderr}"
+    );
+    assert!(
+        stderr.contains("CAROLINA_REPO_ROOT"),
+        "the refusal must say how to fix it: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+}

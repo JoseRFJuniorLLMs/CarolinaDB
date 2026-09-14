@@ -391,6 +391,22 @@ fn repo_root() -> PathBuf {
     }
 }
 
+/// The repository root, or a configuration error naming exactly what is missing.
+///
+/// The campaigns read `fixtures/` and `models/`, which a binary release does not ship. Without this
+/// check the campaign runs anyway and reports `overall FAIL` with "golden bytes missing", which
+/// reads as "the database is broken" when it means "this command needs the repository".
+fn require_repo_root() -> Result<PathBuf, String> {
+    let root = repo_root();
+    if root.join("fixtures").is_dir() {
+        return Ok(root);
+    }
+    Err(format!(
+        "this command reads the repository's `fixtures/`, which a binary release does not ship; none was found under {} or any of its ancestors. Run it from a checkout of the matching commit, or point CAROLINA_REPO_ROOT at one.",
+        root.display()
+    ))
+}
+
 fn default_test_root() -> PathBuf {
     std::env::temp_dir().join("carolina-qualify-scratch")
 }
@@ -400,7 +416,7 @@ fn default_test_root() -> PathBuf {
 fn qualify(args: &[String]) -> Result<ExitCode, String> {
     use carolina_qualify::runner::{run_campaign, CampaignConfig, ConfigError};
     let parsed = (|| -> Result<CampaignConfig, String> {
-        let root = repo_root();
+        let root = require_repo_root()?;
         let test_root = flag(args, "--test-root")
             .map(PathBuf::from)
             .unwrap_or_else(default_test_root);

@@ -44,6 +44,8 @@ met even though `Q3-C5` passes. MVP-4 through MVP-8 are not started.
 - **The checkpoint image walk** skipped dirty pages whose parent had been evicted.
 - **`GROUP BY <key> <= <bound>`** could not be parsed at all.
 - The released `carolina` binary embedded the build machine's absolute path.
+- Running the campaign from an extracted release reported `overall FAIL` with "golden bytes
+  missing" instead of saying that a binary release does not ship the repository's `fixtures/`.
 
 ### Not yet done
 
