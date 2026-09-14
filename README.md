@@ -1,4 +1,7 @@
 # CarolinaDB
+<p align="center">
+  <img src="img/logo.jpg" alt="CarolinaDB — invariant-compiled consistency for distributed stateful systems" width="600" />
+</p>
 
 > **Invariant-compiled consistency for distributed stateful systems.**
 
