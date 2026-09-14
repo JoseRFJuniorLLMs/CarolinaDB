@@ -31,7 +31,8 @@ fn usage() -> ExitCode {
          carolina simulate --seed <n> [--fault Point#nth] [--ops n] [--out <dir>]   one deterministic local schedule + history checker\n  \
          carolina replay --bundle <dir>                   re-run and re-check a bundle's schedule\n  \
          carolina minimize --bundle <dir>                 shrink a failing bundle's schedule\n  \
-         carolina report --campaign <dir>                 print a campaign/run verdict\n"
+         carolina report --campaign <dir>                 print a campaign/run verdict\n  \
+         carolina node status --addr <host:port>          read a running node's status and counters\n"
     );
     ExitCode::from(2)
 }
@@ -61,10 +62,18 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         Some("simulate") => Some((&["--seed", "--fault", "--ops", "--out", "--test-root"], &[])),
         Some("replay" | "minimize") => Some((&["--bundle", "--test-root"], &[])),
         Some("report") => Some((&["--campaign"], &[])),
+        Some("node") => Some((&["--addr", "--cluster", "--timeout-ms"], &[])),
         _ => None,
     };
     if let Some((values, switches)) = option_spec {
-        if let Err(e) = validate_flags(&args[1..], values, switches) {
+        // `node` takes a subcommand word before its options; every other command's options
+        // start right after the command itself.
+        let first_flag = if args.first().map(String::as_str) == Some("node") {
+            2
+        } else {
+            1
+        };
+        if let Err(e) = validate_flags(args.get(first_flag..).unwrap_or(&[]), values, switches) {
             eprintln!("invalid configuration: {e}");
             return Ok(ExitCode::from(2));
         }
@@ -202,6 +211,68 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             println!("{}", String::from_utf8_lossy(&ir.encode()));
             println!("schema_hash={}", h.schema_hash);
             println!("module_hash={}", h.module_hash);
+            Ok(ExitCode::SUCCESS)
+        }
+        Some("node") => {
+            if args.get(1).map(String::as_str) != Some("status") {
+                return Err(
+                    "usage: carolina node status --addr <host:port> [--cluster <name>]".into(),
+                );
+            }
+            let flag = |name: &str| {
+                args.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            let addr: std::net::SocketAddr = flag("--addr")
+                .ok_or("missing --addr")?
+                .parse()
+                .map_err(|e| format!("invalid --addr: {e}"))?;
+            let cluster = carolina_core::ids::ClusterId::derive(
+                &flag("--cluster").unwrap_or("carolina".into()),
+            );
+            let timeout = std::time::Duration::from_millis(
+                flag("--timeout-ms")
+                    .map(|t| t.parse::<u64>())
+                    .transpose()
+                    .map_err(|e| format!("invalid --timeout-ms: {e}"))?
+                    .unwrap_or(3000),
+            );
+            let mut client = carolina_node::Client::connect(
+                addr,
+                cluster,
+                carolina_wire::negotiation::EndpointRole::Admin,
+                timeout,
+            )
+            .map_err(|e| format!("connect: {e}"))?;
+            let s = client.status().map_err(|e| format!("status: {e}"))?;
+            println!(
+                "node {} {} term={} leader={} readiness={}",
+                carolina_core::hash::hex_encode(&s.node.0[..4]),
+                s.role,
+                s.term,
+                s.leader
+                    .map(|l| carolina_core::hash::hex_encode(&l.0[..4]))
+                    .unwrap_or_else(|| "-".into()),
+                s.readiness
+            );
+            println!(
+                "commit_index={} applied_index={} catalog_generation={} durable_commit_seq={}",
+                s.commit_index, s.applied_index, s.catalog_generation.0, s.durable_commit_seq
+            );
+            println!("state_digest={}", s.state_digest);
+            if let Some(f) = &s.failure {
+                println!("failure: {f}");
+            }
+            if s.metrics.is_empty() {
+                println!("note: this node reports no counters");
+            } else {
+                println!("counters:");
+                for (k, v) in &s.metrics {
+                    println!("  {k:<40} {v}");
+                }
+            }
             Ok(ExitCode::SUCCESS)
         }
         Some("fixtures") => {

@@ -226,3 +226,42 @@ fn workload_then_verify_round_trip() {
         "verify must not succeed on a directory that holds no database"
     );
 }
+
+/// `carolina node status --addr …` must survive option validation: the subcommand word is not an
+/// option. Only a genuinely unknown option, or a missing value, is a configuration error (exit 2);
+/// a well-formed address that nothing answers is a runtime failure, not a configuration one.
+#[test]
+fn node_status_accepts_its_subcommand_and_still_rejects_bad_options() {
+    // Port 1 on loopback: well-formed, nothing listens. The command must get past validation and
+    // fail on the connection instead, so exit 2 here would mean the subcommand was mis-parsed.
+    let ok = command()
+        .args([
+            "node",
+            "status",
+            "--addr",
+            "127.0.0.1:1",
+            "--timeout-ms",
+            "200",
+        ])
+        .output()
+        .unwrap();
+    assert_ne!(
+        ok.status.code(),
+        Some(2),
+        "subcommand rejected as an option: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    for args in [
+        vec!["node", "status", "--nope", "x"],
+        vec!["node", "status", "--addr"],
+        vec!["node", "status", "--addr", "--cluster"],
+    ] {
+        let output = command().args(&args).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

@@ -23,9 +23,11 @@ dependencies = [
 name = "carolina-cli"
 version = "0.1.0"
 dependencies = [
+ "carolina-catalog",
  "carolina-compiler",
  "carolina-core",
  "carolina-lang",
+ "carolina-node",
  "carolina-qualify",
  "carolina-runtime",
  "carolina-storage",

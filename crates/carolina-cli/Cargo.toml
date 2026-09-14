@@ -20,6 +20,8 @@ carolina-storage.workspace = true
 carolina-wire.workspace = true
 carolina-runtime.workspace = true
 carolina-qualify.workspace = true
+carolina-node.workspace = true
+carolina-catalog.workspace = true
 
 [lints]
 workspace = true
