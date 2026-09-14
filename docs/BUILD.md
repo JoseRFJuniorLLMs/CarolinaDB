@@ -47,6 +47,7 @@ cargo test --workspace --locked
 python tools/test_spec_lint.py
 python tools/spec_lint.py
 python tools/run_tlc.py
+python tools/run_lean.py
 cargo audit --file Cargo.lock --no-fetch
 cargo build -p carolina-node --locked
 cargo run -p carolina-cli -- qualify --quick --out target/qualification
@@ -55,6 +56,13 @@ cargo run -p carolina-cli -- qualify --quick --out target/qualification
 `cargo audit --no-fetch` uses the locally available RustSec advisory database. CI installs the
 pinned cargo-audit 0.22.2 with nightly Rust and refreshes the advisory database on every push and
 pull request. The audit toolchain is separate from the project's Rust 1.89 MSRV build.
+
+`tools/run_lean.py` checks the machine-checked proofs in `lean/`. It needs the Lean toolchain
+pinned by `lean/lean-toolchain`, installed with [elan](https://elan.lean-lang.org); nothing is
+downloaded by the runner itself. It fails on a build error, on `sorry` anywhere in the sources
+(Lean reports `sorry` as a warning, so a file full of holes still "builds"), and on any theorem
+whose axiom set reaches beyond `propext`, `Quot.sound` and `Classical.choice`. Mathlib is not a
+dependency.
 
 `tools/run_tlc.py` requires Java 17. It downloads TLA+ tools v1.8.0 only when absent,
 verifies the pinned SHA-256 digest, and checks FM-1, FM-2 and FM-3 with their bounded configs.

@@ -1,10 +1,31 @@
 # Formal model targets (SPEC-010 §16)
 
-| Gate | Model | Executed checker | TLA+ source |
-|---|---|---|---|
-| FM-1 | Escrow transfer / authority / rights conservation (SPEC-006 §8, §11, §16) | `crates/carolina-models/src/fm1.rs` | `FM1_Escrow.tla` + `.cfg` |
+| Gate | Model | Executed checker | TLA+ source | Unbounded proof |
+|---|---|---|---|---|
+| FM-1 | Escrow transfer / authority / rights conservation (SPEC-006 §8, §11, §16) | `crates/carolina-models/src/fm1.rs` | `FM1_Escrow.tla` + `.cfg` | `../lean/Carolina/Escrow.lean` |
 | FM-2 | C5 decision, install, publication, completion (SPEC-008 §10, §11, §15) | `crates/carolina-models/src/fm2.rs` | `FM2_Decision.tla` + `.cfg` |
 | FM-3 | Migration, fencing, plan evolution (SPEC-009 §7–§8, SPEC-011 §4/§7) | `crates/carolina-models/src/fm3.rs` | `FM3_Migration.tla` + `.cfg` |
+
+## Machine-checked proofs (`lean/`)
+
+The bounded checkers enumerate a finite slice; the Lean development proves the same invariants
+for **arbitrary** parameters. FM-1 is done: `Carolina.Escrow.safety` establishes rights
+conservation, `CreditImpliesCommit` and `NoRefundAfterCommit` for every total and every list of
+transfer quantities, of any length. Run it with `python tools/run_lean.py`, which fails on a
+build error, on `sorry` anywhere in the sources, and on any theorem whose axiom set reaches
+beyond Lean's own foundations. The toolchain is pinned in `lean/lean-toolchain`; install it with
+[elan](https://elan.lean-lang.org). Mathlib is deliberately not a dependency — the two list
+lemmas the proofs need are proved in place.
+
+Mechanising FM-1 made one thing explicit that the bounded runs never had to state: conservation
+is **not inductive on its own**. It needs the coherence invariant "a message that was sent
+agrees with the phase that sent it", because `ReceiverInstall` credits the receiver on the
+strength of `commitSent` alone. TLC never had to name that, because it explores states rather
+than arguing from a predecessor.
+
+What this is **not**: a proof about the Rust implementation. Lean proves properties of a model,
+and the refinement argument from `crates/` to these models remains open (`md/FALTA.md` item 11).
+FM-2 and FM-3 are not yet mechanised.
 
 ## What is executed
 

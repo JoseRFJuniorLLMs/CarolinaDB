@@ -1,0 +1,5 @@
+name = "carolina"
+defaultTargets = ["Carolina"]
+
+[[lean_lib]]
+name = "Carolina"

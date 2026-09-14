@@ -176,6 +176,14 @@ profile has not been re-run since.
 *models* pass within bounds (see above) but no protocol implementation, deterministic simulator
 adapter or real-process campaign exists for them.
 
+## Machine-checked proofs (`lean/`)
+
+| Deliverable | Status | Where |
+|---|---|---|
+| Machine-checked FM-1 (SPEC-006 §8/§11/§16, SPEC-010 §16): the escrow machine of `models/FM1_Escrow.tla` proved in Lean 4 for an **arbitrary** total and an **arbitrary** list of transfer quantities, where TLC checks `Total = 3, Quantities = <<1, 2>>`. `Carolina.Escrow.safety` gives rights conservation, `CreditImpliesCommit` and `NoRefundAfterCommit` in every reachable state. Mechanising it forced out an invariant the bounded runs never had to state: conservation is not inductive alone, it needs "a sent message agrees with the phase that sent it", because `ReceiverInstall` credits the receiver on `commitSent` alone. Axioms audited: `propext` and `Quot.sound` only, no `sorryAx`; mathlib is not a dependency | ✅ `python tools/run_lean.py` (build + no-`sorry` scan + axiom audit, with a negative control exercised) | `lean/Carolina/Escrow.lean`, `tools/run_lean.py` |
+| FM-2 and FM-3 mechanised proofs | ⬜ not started — bounded TLC and the Rust explicit-state checkers remain their only evidence | `models/FM2_Decision.tla`, `models/FM3_Migration.tla` |
+| Refinement from the Rust implementation to any of these models | ⬜ not started — Lean proves properties of a model; the correspondence is an argument, not a theorem | `md/FALTA.md` item 11 |
+
 ## Test evidence (this tree)
 
 `cargo test --workspace --locked` on 2026-09-14 (Windows 11): 189 tests, all passing — core 25, lang 32 (27 unit + 5 semantic validation), compiler 22 (16 unit + 6 footprint A05), wire 8, storage 25 (4 unit + 4 B+Tree differential + 3 crash matrix/epoch + 13 kernel + 1 overflow-leak regression), runtime 14 (1 unit + 1 invariant scope + 12 end-to-end incl. the outcome counters), qualify 17 (4 unit incl. the codec corpus + 8 acceptance incl. one quick campaign + 5 bundle integrity), models 4, consensus 10 (incl. compaction plus restart and a leader refusing a follower behind its base), catalog 4 (incl. the authorization campaign), node 21 (13 unit incl. seed identity, poison recovery, a three-node in-process cluster, the snapshot/compaction path and the published counters + 7 configuration + 1 three real processes), cli 7 (2 unit + 5 CLI); 0 failed, 0 ignored.
