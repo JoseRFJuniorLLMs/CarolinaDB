@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -78,11 +80,109 @@ def build(source: Path) -> dict[str, str]:
     return out
 
 
+VERSION = "0.1.0"
+# Everything a recipient needs to know what they have and what it is not.
+PAPERS = ("LICENSE", "README.md", "CHANGELOG.md", "SECURITY.md", "sbom.json",
+          "docs/BUILD.md", "docs/STATUS.md")
+
+
+def target_triple() -> str:
+    done = subprocess.run(["rustc", "-vV"], capture_output=True, text=True)
+    for line in done.stdout.splitlines():
+        if line.startswith("host: "):
+            return line[len("host: "):].strip()
+    return "unknown"
+
+
+def toolchain() -> str:
+    done = subprocess.run(["rustc", "--version"], capture_output=True, text=True)
+    return done.stdout.strip()
+
+
+def commit() -> str:
+    done = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
+    return done.stdout.strip() or "unknown"
+
+
+def dirty() -> bool:
+    done = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
+                          capture_output=True, text=True)
+    return bool(done.stdout.strip())
+
+
+def package(out_dir: Path) -> int:
+    """Build, then assemble the archive a release actually ships, plus its digests.
+
+    The digest list is written in `sha256sum -c` format so it can be signed detached, by whatever
+    key the owner chooses. Nothing here signs anything: this project has no release key, and
+    pretending otherwise would be the worst kind of security theatre.
+    """
+    triple = target_triple()
+    if dirty():
+        print("build_release: refusing to package a dirty tree — commit first", file=sys.stderr)
+        return 2
+    digests = build(ROOT)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"carolinadb-{VERSION}-{triple}"
+    archive = out_dir / f"{stem}.tar.gz"
+
+    release = ROOT / "target" / "release"
+    members: list[tuple[Path, str]] = []
+    for name in BINARIES:
+        for candidate in (release / name, release / f"{name}.exe"):
+            if candidate.is_file():
+                members.append((candidate, f"{stem}/bin/{candidate.name}"))
+                break
+    for paper in PAPERS:
+        source = ROOT / paper
+        if source.is_file():
+            members.append((source, f"{stem}/{Path(paper).name}"))
+
+    # deterministic archive: sorted, no owner names, no mtimes
+    with tarfile.open(archive, "w:gz", compresslevel=9, format=tarfile.GNU_FORMAT) as tar:
+        for source, arcname in sorted(members, key=lambda m: m[1]):
+            info = tar.gettarinfo(str(source), arcname=arcname)
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.mtime = 0
+            with source.open("rb") as stream:
+                tar.addfile(info, stream)
+
+    manifest = {
+        "name": "carolinadb",
+        "version": VERSION,
+        "commit": commit(),
+        "target": triple,
+        "toolchain": toolchain(),
+        "reproducible": "verified by tools/build_release.py --verify",
+        "signature": "none — this project has no release key (owner decision)",
+        "scope": "research prototype; DEV_LOCAL plaintext loopback profile only; QI-SECURITY NOT_RUN",
+        "artifacts": {archive.name: digest(archive)},
+        "binaries": digests,
+    }
+    (out_dir / "MANIFEST.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + chr(10), encoding="utf-8")
+    sums = "".join(f"{digest(p)}  {p.name}" + chr(10)
+                   for p in sorted(out_dir.iterdir()) if p.name != "SHA256SUMS")
+    (out_dir / "SHA256SUMS").write_text(sums, encoding="utf-8")
+    print(f"  {archive.name}: {manifest['artifacts'][archive.name]}")
+    for name, value in sorted(digests.items()):
+        print(f"  {name}: {value}")
+    print(f"build_release: packaged {archive} (unsigned)")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verify", action="store_true",
                         help="build twice from two differently named copies and compare")
+    parser.add_argument("--package", action="store_true",
+                        help="build and assemble the release archive, digests and manifest")
+    parser.add_argument("--out", default=str(ROOT / "release"))
     args = parser.parse_args()
+
+    if args.package:
+        return package(Path(args.out))
 
     if not args.verify:
         for name, value in sorted(build(ROOT).items()):
