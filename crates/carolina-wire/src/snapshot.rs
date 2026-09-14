@@ -6,7 +6,7 @@ use carolina_core::hash::{domain_hash, domains, Hash256};
 use carolina_core::ids::*;
 use carolina_core::limits::Limits;
 
-use crate::registry::{CanonicalRecord, REGISTERED_KINDS};
+use crate::registry::{is_registered, CanonicalRecord, REGISTERED_KINDS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotKind {
@@ -95,7 +95,14 @@ impl SnapshotManifestV1 {
     pub fn manifest_hash(&self) -> Hash256 {
         domain_hash(domains::SNAPSHOT_MANIFEST_V1, &self.encode())
     }
-    pub fn validate_chunks(&self, chunks: &[SnapshotChunkV1]) -> CoreResult<()> {
+    /// Validate a complete chunk set against this manifest.
+    ///
+    /// `limits` is required because a chunk arrives from outside this process: its declared size
+    /// bound (SPEC-012 §11) has to be enforced on ingest, and every record it carries has to be a
+    /// registered kind/version. Decoding a chunk does not check either — `CanonicalRecord::from_canon`
+    /// accepts any kind string, and only `decode_checked` consults the registry — so an importer
+    /// that trusted decoding alone would install records this build cannot interpret.
+    pub fn validate_chunks(&self, chunks: &[SnapshotChunkV1], limits: &Limits) -> CoreResult<()> {
         if chunks.len() != self.chunks.len() {
             return Err(CoreError::new(
                 ErrorCode::Corruption,
@@ -128,6 +135,18 @@ impl SnapshotManifestV1 {
                     ErrorCode::Corruption,
                     "chunk length/hash mismatch",
                 ));
+            }
+            c.check_size(limits)?;
+            for r in &c.records {
+                if !is_registered(&r.record_kind, r.record_version) {
+                    return Err(CoreError::new(
+                        ErrorCode::UnsupportedCodec,
+                        format!(
+                            "chunk {i} carries unregistered record kind {}/{}",
+                            r.record_kind, r.record_version
+                        ),
+                    ));
+                }
             }
         }
         Ok(())
@@ -421,18 +440,21 @@ mod tests {
             authority_fences: vec![],
             chunks: vec![chunk.descriptor()],
         };
-        assert!(m.validate_chunks(std::slice::from_ref(&chunk)).is_ok());
-        assert!(m.validate_chunks(&[]).is_err());
+        let lim = Limits::v1();
+        assert!(m
+            .validate_chunks(std::slice::from_ref(&chunk), &lim)
+            .is_ok());
+        assert!(m.validate_chunks(&[], &lim).is_err());
         let other = SnapshotChunkV1 {
             snapshot_id: [8u8; 16],
             ..chunk.clone()
         };
-        assert!(m.validate_chunks(&[other]).is_err());
+        assert!(m.validate_chunks(&[other], &lim).is_err());
         let dup = SnapshotChunkV1 {
             index: 0,
             ..chunk.clone()
         };
-        assert!(m.validate_chunks(&[chunk.clone(), dup]).is_err());
+        assert!(m.validate_chunks(&[chunk.clone(), dup], &lim).is_err());
         let back = SnapshotManifestV1::decode(&m.encode(), &Limits::v1()).unwrap();
         assert_eq!(back, m);
         assert_eq!(back.manifest_hash(), m.manifest_hash());
@@ -440,6 +462,91 @@ mod tests {
         assert_eq!(
             CodecManifest::decode(&cm.encode(), &Limits::v1()).unwrap(),
             cm
+        );
+    }
+
+    /// SPEC-012 §11: a chunk arrives from outside this process, so validation has to enforce the
+    /// declared size bound and refuse record kinds this build does not know. Decoding checks
+    /// neither — `CanonicalRecord::from_canon` accepts any kind string.
+    #[test]
+    fn a_chunk_is_refused_when_it_is_oversized_or_carries_an_unregistered_kind() {
+        let sid = [3u8; 16];
+        let manifest_for = |c: &SnapshotChunkV1| SnapshotManifestV1 {
+            snapshot_id: sid,
+            snapshot_version: 1,
+            cluster_id: ClusterId::derive("c"),
+            tenant_scope: vec![],
+            kind: SnapshotKind::LocalStorage,
+            source_identity: StorageId::derive("s"),
+            source_storage_epoch: StorageEpoch(1),
+            catalog_generation: CatalogGeneration(1),
+            plan_refs: vec![],
+            idc_bindings: vec![],
+            membership_generation: MembershipGeneration(1),
+            semantic_cut_with_holes: CanonValue::Null,
+            required_codec_manifest: CodecManifest::v1().manifest_hash(),
+            required_artifact_refs: vec![],
+            request_namespace_retirements: vec![],
+            retained_result_horizons: CanonValue::Null,
+            unresolved_protocol_refs: vec![],
+            authority_fences: vec![],
+            chunks: vec![c.descriptor()],
+        };
+
+        // a record whose kind is not in the registry
+        let unknown = SnapshotChunkV1 {
+            snapshot_id: sid,
+            index: 0,
+            records: vec![CanonicalRecord {
+                record_kind: "storage_row".into(),
+                record_version: 1,
+                body: CanonValue::Null,
+            }],
+        };
+        let m = manifest_for(&unknown);
+        assert_eq!(
+            m.validate_chunks(std::slice::from_ref(&unknown), &Limits::v1())
+                .unwrap_err()
+                .code,
+            ErrorCode::UnsupportedCodec
+        );
+
+        // a registered kind at an unregistered version is refused the same way
+        let bad_version = SnapshotChunkV1 {
+            records: vec![CanonicalRecord {
+                record_kind: "compiled_batch".into(),
+                record_version: 2,
+                body: CanonValue::Null,
+            }],
+            ..unknown.clone()
+        };
+        let m = manifest_for(&bad_version);
+        assert_eq!(
+            m.validate_chunks(std::slice::from_ref(&bad_version), &Limits::v1())
+                .unwrap_err()
+                .code,
+            ErrorCode::UnsupportedCodec
+        );
+
+        // and the size bound is enforced: the same chunk passes under v1 and fails under the
+        // tiny profile, whose limit is far smaller
+        let ok = SnapshotChunkV1 {
+            records: vec![CanonicalRecord {
+                record_kind: "compiled_batch".into(),
+                record_version: 1,
+                body: CanonValue::str("x".repeat(4096)),
+            }],
+            ..unknown.clone()
+        };
+        let m = manifest_for(&ok);
+        assert!(m
+            .validate_chunks(std::slice::from_ref(&ok), &Limits::v1())
+            .is_ok());
+        assert_eq!(
+            m.validate_chunks(std::slice::from_ref(&ok), &Limits::tiny())
+                .unwrap_err()
+                .code,
+            ErrorCode::ResourceLimit
         );
     }
 }
