@@ -104,10 +104,22 @@ def commit() -> str:
     return done.stdout.strip() or "unknown"
 
 
-def dirty() -> bool:
-    done = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
-                          capture_output=True, text=True)
-    return bool(done.stdout.strip())
+def modified() -> list[str]:
+    """Tracked files that differ from HEAD.
+
+    Untracked files are reported but do not block: cargo does not compile what it does not know
+    about, and if something did reference such a file, the tracked file doing the referencing
+    would itself be modified and caught here.
+    """
+    done = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                          cwd=ROOT, capture_output=True, text=True)
+    return [line for line in done.stdout.splitlines() if line.strip()]
+
+
+def untracked() -> list[str]:
+    done = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"],
+                          cwd=ROOT, capture_output=True, text=True)
+    return [line for line in done.stdout.splitlines() if line.strip()]
 
 
 def package(out_dir: Path) -> int:
@@ -118,9 +130,18 @@ def package(out_dir: Path) -> int:
     pretending otherwise would be the worst kind of security theatre.
     """
     triple = target_triple()
-    if dirty():
-        print("build_release: refusing to package a dirty tree — commit first", file=sys.stderr)
+    changed = modified()
+    if changed:
+        print("build_release: refusing to package — these tracked files differ from HEAD:",
+              file=sys.stderr)
+        for line in changed:
+            print(f"  {line}", file=sys.stderr)
+        print("an artifact whose commit cannot be named is not a release", file=sys.stderr)
         return 2
+    loose = untracked()
+    if loose:
+        shown = ", ".join(loose[:5]) + (" ..." if len(loose) > 5 else "")
+        print(f"build_release: note — {len(loose)} untracked file(s) present, not packaged: {shown}")
     digests = build(ROOT)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"carolinadb-{VERSION}-{triple}"
