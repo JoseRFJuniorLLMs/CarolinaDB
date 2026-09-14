@@ -216,6 +216,70 @@ pub struct LocalEngine {
     home: LocalRequestHome,
     cluster_id: ClusterId,
     grant_ref: ProtocolRecordRef,
+    metrics: EngineMetrics,
+}
+
+/// What the request path actually did, counted by outcome (SPEC-001 §63, SPEC-010 §13).
+///
+/// The split that matters operationally is the one the contract makes: a business rejection is a
+/// final answer, an admission refusal never ran anything, and an unknown outcome is neither. A
+/// single "errors" number would hide exactly the distinction the system exists to preserve.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EngineMetrics {
+    /// Invocations that reached the engine (retries of one request count each time).
+    pub invocations: u64,
+    pub committed: u64,
+    /// Business rejections: a final receipt that says no.
+    pub rejected: u64,
+    /// Refused before any effect: stale plan or schema, unknown operation, not ready.
+    pub refused: u64,
+    /// The same request key arrived with different content.
+    pub identity_mismatch: u64,
+    /// The outcome may or may not be durable; the client must resolve, never retry blindly.
+    pub outcome_unknown: u64,
+    /// The result was evicted, or its namespace retired, before the client came back.
+    pub identity_expired: u64,
+    /// Replies served byte-identically from a retained terminal result instead of executing
+    /// (SPEC-012 §3). `committed` and `rejected` each count both kinds, so the number of real
+    /// executions is `committed + rejected - retained_replays`.
+    ///
+    /// This is a per-process counter and must not be summed or compared across voters: on a
+    /// replicated node only the leader answers a client's retry, so only the leader counts it,
+    /// while every voter counts the one ordered execution.
+    pub retained_replays: u64,
+    pub resolves: u64,
+    pub resolved_terminal: u64,
+    pub resolved_absent: u64,
+    pub resolved_pending: u64,
+    pub resolved_unavailable: u64,
+    pub results_evicted: u64,
+    pub namespaces_retired: u64,
+}
+
+impl EngineMetrics {
+    pub fn to_map(&self, prefix: &str) -> std::collections::BTreeMap<String, u64> {
+        let mut m = std::collections::BTreeMap::new();
+        for (k, v) in [
+            ("invocations", self.invocations),
+            ("committed", self.committed),
+            ("rejected", self.rejected),
+            ("refused", self.refused),
+            ("identity_mismatch", self.identity_mismatch),
+            ("outcome_unknown", self.outcome_unknown),
+            ("identity_expired", self.identity_expired),
+            ("retained_replays", self.retained_replays),
+            ("resolves", self.resolves),
+            ("resolved_terminal", self.resolved_terminal),
+            ("resolved_absent", self.resolved_absent),
+            ("resolved_pending", self.resolved_pending),
+            ("resolved_unavailable", self.resolved_unavailable),
+            ("results_evicted", self.results_evicted),
+            ("namespaces_retired", self.namespaces_retired),
+        ] {
+            m.insert(format!("{prefix}.{k}"), v);
+        }
+        m
+    }
 }
 
 enum Phase {
@@ -292,6 +356,7 @@ impl LocalEngine {
             home,
             cluster_id: opts.cluster_id,
             grant_ref,
+            metrics: EngineMetrics::default(),
         })
     }
 
@@ -318,10 +383,29 @@ impl LocalEngine {
 
     /// Serve one client request (SPEC-012 §5). Never panics on client input.
     pub fn invoke(&mut self, inv: &InvokeV1) -> ClientReplyV1 {
-        match self.try_invoke(inv) {
+        let reply = match self.try_invoke(inv) {
             Ok(r) => r,
             Err((phase, e)) => Self::error_reply(inv, phase, e, self.home.home_id, self.home.epoch),
+        };
+        self.metrics.invocations += 1;
+        match &reply {
+            ClientReplyV1::Committed(_) => self.metrics.committed += 1,
+            ClientReplyV1::Rejected(_) => self.metrics.rejected += 1,
+            ClientReplyV1::Unavailable(_) | ClientReplyV1::ProtocolError { .. } => {
+                self.metrics.refused += 1
+            }
+            ClientReplyV1::OutcomeUnknown(_) => self.metrics.outcome_unknown += 1,
+            ClientReplyV1::RequestIdentityMismatch => self.metrics.identity_mismatch += 1,
+            ClientReplyV1::ResultExpired(_) | ClientReplyV1::IdentityExpired { .. } => {
+                self.metrics.identity_expired += 1
+            }
         }
+        reply
+    }
+
+    /// Counters of what the request path did, by outcome.
+    pub fn metrics(&self) -> &EngineMetrics {
+        &self.metrics
     }
 
     fn error_reply(
@@ -478,6 +562,7 @@ impl LocalEngine {
                         "terminal binding without receipt",
                     ))
                 })?;
+                self.metrics.retained_replays += 1;
                 return Ok(Self::reply_from_receipt(r));
             }
             BindingState::ResultExpired => {
@@ -495,6 +580,7 @@ impl LocalEngine {
         // batch, but the check keeps the invariant "one execution per key" independent of that)
         if let Some(st) = self.store.txn_status(binding.txn_id).map_err(post)? {
             if let Some(t) = &st.terminal_outcome {
+                self.metrics.retained_replays += 1;
                 return Ok(Self::reply_from_receipt(t.receipt()));
             }
             if st.phase == TxnPhase::Prepared {
@@ -704,14 +790,22 @@ impl LocalEngine {
 
     /// Resolve a lost reply from durable state (SPEC-012 §6).
     pub fn resolve(&mut self, req: &ResolveRequestV1) -> ResolveReplyV1 {
-        match self.try_resolve(req) {
+        let reply = match self.try_resolve(req) {
             Ok(r) => r,
             Err(e) => ResolveReplyV1::Unavailable(RefusalV1 {
                 code: format!("{:?}", e.code),
                 detail: e.message,
                 possibly_admitted: true,
             }),
+        };
+        self.metrics.resolves += 1;
+        match &reply {
+            ResolveReplyV1::Terminal(_) => self.metrics.resolved_terminal += 1,
+            ResolveReplyV1::Pending { .. } => self.metrics.resolved_pending += 1,
+            ResolveReplyV1::AbsentAtBarrier { .. } => self.metrics.resolved_absent += 1,
+            ResolveReplyV1::Unavailable(_) => self.metrics.resolved_unavailable += 1,
         }
+        reply
     }
 
     fn try_resolve(&mut self, req: &ResolveRequestV1) -> CoreResult<ResolveReplyV1> {
@@ -789,7 +883,10 @@ impl LocalEngine {
 
     /// Evict a retained result (SPEC-012 §7): the receipt is replaced by a tombstone that keeps
     /// the outcome, the receipt digest and the decision reference.
+    /// Evict a retained result: the receipt becomes a tombstone and the identity can never be
+    /// reused (SPEC-012 §6).
     pub fn evict_result(&mut self, key: &RequestKey) -> CoreResult<ResultTombstoneV1> {
+        self.metrics.results_evicted += 1;
         let (rev, b) = LocalRequestHome::lookup(&mut self.store, key)?
             .ok_or_else(|| CoreError::new(ErrorCode::MissingRecord, "no binding"))?;
         let r = match (&b.state, &b.terminal_receipt) {
@@ -841,6 +938,7 @@ impl LocalEngine {
         ns: RequestNamespace,
         reason: &str,
     ) -> CoreResult<ProtocolRecordRef> {
+        self.metrics.namespaces_retired += 1;
         let rk = retirement_key(tenant, ns);
         let rec = NamespaceRetirementV1 {
             tenant_id: tenant,

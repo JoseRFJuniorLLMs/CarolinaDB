@@ -46,6 +46,7 @@ pub enum CatalogKey {
     Migration(MigrationId),
     ScopeLock(TenantId, SemanticScopeId),
     SecurityPolicy(SecurityPolicyId),
+    PermissionGrant(GrantId),
     Artifact(String, Hash256),
     AdminCommand(AdminRequestId),
 }
@@ -88,6 +89,9 @@ impl Canonical for CatalogKey {
             CatalogKey::SecurityPolicy(p) => {
                 b.fstr("kind", "SecurityPolicy").fc("policy", p).build()
             }
+            CatalogKey::PermissionGrant(g) => {
+                b.fc("grant", g).fstr("kind", "PermissionGrant").build()
+            }
             CatalogKey::Artifact(k, h) => b
                 .fstr("artifact_kind", k)
                 .fc("hash", h)
@@ -129,6 +133,9 @@ impl Canonical for CatalogKey {
             ),
             "SecurityPolicy" => {
                 CatalogKey::SecurityPolicy(SecurityPolicyId::from_canon(v.field("policy")?)?)
+            }
+            "PermissionGrant" => {
+                CatalogKey::PermissionGrant(GrantId::from_canon(v.field("grant")?)?)
             }
             "Artifact" => CatalogKey::Artifact(
                 v.field("artifact_kind")?.as_str()?.to_string(),
@@ -405,6 +412,64 @@ impl Canonical for AuthorityGrant {
             security_policy: SecurityPolicyId::from_canon(v.field("security_policy")?)?,
             admission_mode: v.field("admission_mode")?.as_str()?.to_string(),
             state: GrantState::from_label(v.field("state")?.as_str()?)?,
+        })
+    }
+}
+
+/// An immutable application permission installed by the catalog (SPEC-013 §4).
+///
+/// The first security slice deliberately supports exact tenant/namespace scopes. A grant cannot
+/// expand itself through request arguments and credential rotation can retain the same principal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionGrant {
+    pub grant_id: GrantId,
+    pub principal: PrincipalId,
+    pub tenant: TenantId,
+    pub namespace: RequestNamespace,
+    pub operations: Vec<OperationRef>,
+    pub allow_invoke: bool,
+    pub allow_resolve: bool,
+    pub security_policy: SecurityPolicyId,
+    pub active: bool,
+}
+
+impl Canonical for PermissionGrant {
+    fn to_canon(&self) -> CanonValue {
+        CanonValue::obj()
+            .fbool("active", self.active)
+            .fbool("allow_invoke", self.allow_invoke)
+            .fbool("allow_resolve", self.allow_resolve)
+            .fc("grant_id", &self.grant_id)
+            .fc("namespace", &self.namespace)
+            .fset("operations", &self.operations)
+            .fc("principal", &self.principal)
+            .fc("security_policy", &self.security_policy)
+            .fc("tenant", &self.tenant)
+            .build()
+    }
+
+    fn from_canon(v: &CanonValue) -> CoreResult<Self> {
+        v.expect_fields(&[
+            "active",
+            "allow_invoke",
+            "allow_resolve",
+            "grant_id",
+            "namespace",
+            "operations",
+            "principal",
+            "security_policy",
+            "tenant",
+        ])?;
+        Ok(PermissionGrant {
+            grant_id: GrantId::from_canon(v.field("grant_id")?)?,
+            principal: PrincipalId::from_canon(v.field("principal")?)?,
+            tenant: TenantId::from_canon(v.field("tenant")?)?,
+            namespace: RequestNamespace::from_canon(v.field("namespace")?)?,
+            operations: carolina_core::canon::decode_set(v.field("operations")?)?,
+            allow_invoke: v.field("allow_invoke")?.as_bool()?,
+            allow_resolve: v.field("allow_resolve")?.as_bool()?,
+            security_policy: SecurityPolicyId::from_canon(v.field("security_policy")?)?,
+            active: v.field("active")?.as_bool()?,
         })
     }
 }
@@ -887,6 +952,67 @@ impl Catalog {
         self.get(&CatalogKey::Authority(id))
             .and_then(|e| AuthorityGrant::from_canon(&e.value).ok())
     }
+    pub fn permission_grant(&self, id: GrantId) -> Option<PermissionGrant> {
+        self.get(&CatalogKey::PermissionGrant(id))
+            .and_then(|e| PermissionGrant::from_canon(&e.value).ok())
+            .filter(|grant| grant.grant_id == id)
+    }
+    /// Bootstrap administration is the only administrative authority in the initial profile.
+    pub fn admin_allowed(&self, principal: PrincipalId) -> bool {
+        self.genesis
+            .as_ref()
+            .is_some_and(|m| m.bootstrap_admin == principal)
+    }
+    pub fn invoke_allowed(
+        &self,
+        principal: PrincipalId,
+        tenant: TenantId,
+        namespace: RequestNamespace,
+        operation: OperationRef,
+    ) -> bool {
+        self.live_entries().any(|entry| {
+            let CatalogKey::PermissionGrant(key_id) = &entry.key else {
+                return false;
+            };
+            PermissionGrant::from_canon(&entry.value).is_ok_and(|grant| {
+                grant.grant_id == *key_id
+                    && grant.active
+                    && grant.allow_invoke
+                    && grant.principal == principal
+                    && grant.tenant == tenant
+                    && grant.namespace == namespace
+                    && grant.operations.contains(&operation)
+                    && self
+                        .genesis
+                        .as_ref()
+                        .is_some_and(|m| m.security_policy == grant.security_policy)
+            })
+        })
+    }
+    pub fn resolve_allowed(
+        &self,
+        principal: PrincipalId,
+        tenant: TenantId,
+        namespace: RequestNamespace,
+    ) -> bool {
+        self.live_entries().any(|entry| {
+            let CatalogKey::PermissionGrant(key_id) = &entry.key else {
+                return false;
+            };
+            PermissionGrant::from_canon(&entry.value).is_ok_and(|grant| {
+                grant.grant_id == *key_id
+                    && grant.active
+                    && grant.allow_resolve
+                    && grant.principal == principal
+                    && grant.tenant == tenant
+                    && grant.namespace == namespace
+                    && self
+                        .genesis
+                        .as_ref()
+                        .is_some_and(|m| m.security_policy == grant.security_policy)
+            })
+        })
+    }
     pub fn route(
         &self,
         tenant: TenantId,
@@ -1100,6 +1226,9 @@ impl Catalog {
 
     /// All expected revisions, predicates and mutation preconditions against the committed state.
     fn validate(&self, c: &CatalogCommand) -> Result<(), String> {
+        if !self.admin_allowed(c.principal) {
+            return Err("AuthorizationDenied".into());
+        }
         for (key, exp) in &c.expected {
             match (self.entries.get(key), exp) {
                 (None, Expected::Absent) => {}
@@ -1163,13 +1292,28 @@ impl Catalog {
         }
         for m in &c.mutations {
             match m {
-                Mutation::PutImmutable { key, .. } => {
+                Mutation::PutImmutable { key, value } => {
                     if let Some(e) = self.entries.get(key) {
                         return Err(if e.state == EntryState::Tombstoned {
                             "ArtifactIdentityConflict:tombstoned".into()
                         } else {
                             "ArtifactIdentityConflict:present".into()
                         });
+                    }
+                    if let CatalogKey::PermissionGrant(key_id) = key {
+                        let grant = PermissionGrant::from_canon(value)
+                            .map_err(|_| "InvalidPermissionGrant:encoding".to_string())?;
+                        if grant.grant_id != *key_id {
+                            return Err("InvalidPermissionGrant:identity".into());
+                        }
+                        if self.genesis.as_ref().is_none_or(|manifest| {
+                            grant.security_policy != manifest.security_policy
+                        }) {
+                            return Err("InvalidPermissionGrant:security-policy".into());
+                        }
+                        if grant.operations.is_empty() {
+                            return Err("InvalidPermissionGrant:empty-operations".into());
+                        }
                     }
                 }
                 Mutation::AdvancePointer { key, .. } => {
@@ -1455,6 +1599,174 @@ pub fn acceptance_campaign() -> Result<Vec<String>, String> {
     Ok(passed)
 }
 
+/// Non-cryptographic authorization slice of SPEC-013. Transport authentication remains a
+/// separate qualification requirement; these checks prove that an authenticated principal value
+/// cannot cross the catalog or tenant/namespace permission boundaries.
+pub fn authorization_campaign() -> Result<Vec<String>, String> {
+    let manifest = BootstrapManifest {
+        cluster_id: ClusterId::derive("cluster-authz"),
+        voters: vec![
+            NodeId::derive("n1"),
+            NodeId::derive("n2"),
+            NodeId::derive("n3"),
+        ],
+        trust_root_hash: Hash256([9; 32]),
+        security_policy: SecurityPolicyId::derive("policy-authz"),
+        bootstrap_admin: PrincipalId::derive("admin-authz"),
+        security_profile: "DEV_LOCAL".into(),
+    };
+    let mut catalog = Catalog::new();
+    catalog
+        .apply(
+            1,
+            &LogCommand::Genesis(manifest.clone()),
+            manifest.manifest_hash(),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let attacker = CatalogCommand {
+        admin_request_id: AdminRequestId::derive("authz/attacker"),
+        principal: PrincipalId::derive("attacker"),
+        expected: vec![],
+        predicates: vec![],
+        mutations: vec![Mutation::PutImmutable {
+            key: CatalogKey::Artifact("forged".into(), Hash256([3; 32])),
+            value: CanonValue::str("forged"),
+        }],
+    };
+    let denied = catalog
+        .apply(2, &LogCommand::Catalog(attacker), manifest.manifest_hash())
+        .map_err(|e| e.to_string())?
+        .ok_or("authorization command produced no result")?;
+    if denied.failure.as_deref() != Some("AuthorizationDenied")
+        || catalog
+            .get(&CatalogKey::Artifact("forged".into(), Hash256([3; 32])))
+            .is_some()
+    {
+        return Err("SEC-02/14: unauthorized catalog mutation was not denied atomically".into());
+    }
+
+    let tenant = TenantId::derive("tenant-authz");
+    let namespace = RequestNamespace::derive("namespace-authz");
+    let operation = OperationRef {
+        operation_id: OperationId(17),
+        version: 1,
+    };
+    let client = PrincipalId::derive("client-authz");
+    let grant_id = GrantId::derive("permission-authz");
+    let permission = PermissionGrant {
+        grant_id,
+        principal: client,
+        tenant,
+        namespace,
+        operations: vec![operation],
+        allow_invoke: true,
+        allow_resolve: true,
+        security_policy: manifest.security_policy,
+        active: true,
+    };
+    let mismatched_id = GrantId::derive("permission-authz-mismatched-key");
+    let malformed = CatalogCommand {
+        admin_request_id: AdminRequestId::derive("authz/malformed-grant"),
+        principal: manifest.bootstrap_admin,
+        expected: vec![(CatalogKey::PermissionGrant(mismatched_id), Expected::Absent)],
+        predicates: vec![],
+        mutations: vec![Mutation::PutImmutable {
+            key: CatalogKey::PermissionGrant(mismatched_id),
+            value: permission.to_canon(),
+        }],
+    };
+    let malformed_result = catalog
+        .apply(3, &LogCommand::Catalog(malformed), manifest.manifest_hash())
+        .map_err(|e| e.to_string())?
+        .ok_or("malformed permission command produced no result")?;
+    if malformed_result.failure.as_deref() != Some("InvalidPermissionGrant:identity")
+        || catalog.permission_grant(mismatched_id).is_some()
+    {
+        return Err("SEC-14: mismatched permission identity was not denied atomically".into());
+    }
+    let install = CatalogCommand {
+        admin_request_id: AdminRequestId::derive("authz/install"),
+        principal: manifest.bootstrap_admin,
+        expected: vec![(CatalogKey::PermissionGrant(grant_id), Expected::Absent)],
+        predicates: vec![],
+        mutations: vec![Mutation::PutImmutable {
+            key: CatalogKey::PermissionGrant(grant_id),
+            value: permission.to_canon(),
+        }],
+    };
+    let installed = catalog
+        .apply(4, &LogCommand::Catalog(install), manifest.manifest_hash())
+        .map_err(|e| e.to_string())?
+        .ok_or("permission install produced no result")?;
+    if installed.failure.is_some() {
+        return Err(format!(
+            "permission install failed: {:?}",
+            installed.failure
+        ));
+    }
+    if !catalog.invoke_allowed(client, tenant, namespace, operation)
+        || !catalog.resolve_allowed(client, tenant, namespace)
+        || catalog.invoke_allowed(
+            client,
+            TenantId::derive("tenant-other"),
+            namespace,
+            operation,
+        )
+        || catalog.invoke_allowed(
+            client,
+            tenant,
+            RequestNamespace::derive("namespace-other"),
+            operation,
+        )
+        || catalog.invoke_allowed(
+            client,
+            tenant,
+            namespace,
+            OperationRef {
+                operation_id: OperationId(18),
+                version: 1,
+            },
+        )
+        || catalog.invoke_allowed(
+            client,
+            tenant,
+            namespace,
+            OperationRef {
+                operation_id: operation.operation_id,
+                version: 2,
+            },
+        )
+        || catalog.resolve_allowed(PrincipalId::derive("other-client"), tenant, namespace)
+    {
+        return Err("SEC-02: exact tenant namespace or operation boundary was not enforced".into());
+    }
+
+    let revoke = CatalogCommand {
+        admin_request_id: AdminRequestId::derive("authz/revoke"),
+        principal: manifest.bootstrap_admin,
+        expected: vec![],
+        predicates: vec![],
+        mutations: vec![Mutation::Tombstone {
+            key: CatalogKey::PermissionGrant(grant_id),
+        }],
+    };
+    catalog
+        .apply(5, &LogCommand::Catalog(revoke), manifest.manifest_hash())
+        .map_err(|e| e.to_string())?;
+    if catalog.invoke_allowed(client, tenant, namespace, operation)
+        || catalog.resolve_allowed(client, tenant, namespace)
+    {
+        return Err("SEC-09: a tombstoned permission still authorized new disclosure".into());
+    }
+
+    Ok(vec![
+        "SEC-02 tenant/namespace isolation".into(),
+        "SEC-09 current authorization on resolve".into(),
+        "SEC-14 privileged mutation authorization".into(),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1463,6 +1775,12 @@ mod tests {
     fn acceptance_campaign_passes() {
         let p = acceptance_campaign().unwrap();
         assert!(p.contains(&"CAT-15".to_string()));
+    }
+
+    #[test]
+    fn authorization_campaign_passes() {
+        let passed = authorization_campaign().unwrap();
+        assert_eq!(passed.len(), 3);
     }
 
     fn manifest() -> BootstrapManifest {

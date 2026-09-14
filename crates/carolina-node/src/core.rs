@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use carolina_catalog::{
     AuthorityGrant, Catalog, CatalogCommand, CatalogKey, CatalogSnapshot, Expected, GrantState,
-    LogCommand, Mutation, Predicate, RequestRoute,
+    LogCommand, Mutation, PermissionGrant, Predicate, RequestRoute,
 };
 use carolina_consensus::{Config, Envelope, FileRaftStorage, Raft, ReadIndex, Role};
 use carolina_core::canon::{CanonValue, Canonical};
@@ -39,6 +39,7 @@ const ROUTE_BUCKET: u32 = 0;
 struct Waiter {
     conn: ConnId,
     stream_id: u64,
+    principal: PrincipalId,
 }
 
 struct PendingInvoke {
@@ -69,6 +70,8 @@ pub struct NodeCore {
     /// Where `node.snapshot` lives, how many entries have been applied since the last image and
     /// the index that image covers.
     snapshot_dir: std::path::PathBuf,
+    /// Requests and admin commands refused because the principal was not allowed (SPEC-013 §5).
+    authorization_denied: u64,
     entries_since_snapshot: u64,
     snapshot_index: u64,
     decided: BTreeSet<RequestKey>,
@@ -81,9 +84,9 @@ pub struct NodeCore {
     decision_proposals: BTreeMap<RequestKey, u64>,
     was_leader: bool,
     /// (term, log index) of the bootstrap proposal awaiting application.
-    bootstrap_pending: Option<(u64, u64)>,
     failure: Option<String>,
     grant_id: GrantId,
+    client_grant_id: GrantId,
     tenant: TenantId,
     namespace: RequestNamespace,
 }
@@ -270,6 +273,7 @@ impl NodeCore {
             .unwrap_or_else(|| RequestNamespace::derive("default"));
         Ok(NodeCore {
             grant_id: GrantId::derive(&format!("{}/home-grant", cfg.home)),
+            client_grant_id: GrantId::derive(&format!("{}/client-permission", cfg.home)),
             cfg,
             me,
             raft,
@@ -280,6 +284,7 @@ impl NodeCore {
             conns,
             applied_index,
             snapshot_dir: data,
+            authorization_denied: 0,
             entries_since_snapshot: 0,
             snapshot_index: applied_index,
             decided,
@@ -291,7 +296,6 @@ impl NodeCore {
             ready_reads_backlog: Vec::new(),
             decision_proposals: BTreeMap::new(),
             was_leader: false,
-            bootstrap_pending: None,
             failure: None,
             tenant,
             namespace,
@@ -309,6 +313,10 @@ impl NodeCore {
         self.failure.is_none()
             && self.catalog.genesis().is_some()
             && self.catalog.admission_allowed(self.grant_id, self.me)
+            && self
+                .catalog
+                .permission_grant(self.client_grant_id)
+                .is_some()
             && self.raft.leader().is_some()
     }
 
@@ -319,6 +327,12 @@ impl NodeCore {
             "WaitingGenesis".into()
         } else if !self.catalog.admission_allowed(self.grant_id, self.me) {
             "WaitingGrant".into()
+        } else if self
+            .catalog
+            .permission_grant(self.client_grant_id)
+            .is_none()
+        {
+            "WaitingSecurityPolicy".into()
         } else if self.raft.leader().is_none() {
             "NoLeader".into()
         } else {
@@ -328,6 +342,7 @@ impl NodeCore {
 
     fn status(&mut self) -> NodeStatus {
         let digest = state_digest(self.engine.store()).unwrap_or(Hash256::ZERO);
+        let metrics = self.metrics();
         NodeStatus {
             node: self.me,
             readiness: self.readiness_label(),
@@ -342,7 +357,85 @@ impl NodeCore {
             state_digest: digest,
             durable_commit_seq: self.engine.store().durable_commit_seq().0,
             failure: self.failure.clone(),
+            metrics,
         }
+    }
+
+    /// Everything this node counts: the request path, the storage kernel, consensus and the
+    /// control plane. Gauges are reported as their current value, counters as totals since the
+    /// process started; nothing here is derived from wall-clock time.
+    fn metrics(&mut self) -> BTreeMap<String, u64> {
+        let mut m = self.engine.metrics().to_map("engine");
+        let sm = &self.engine.store().metrics;
+        for (k, v) in [
+            ("commit_total", sm.commit_total),
+            ("prepare_total", sm.prepare_total),
+            ("checkpoint_total", sm.checkpoint_total),
+            ("recovery_replayed_batches", sm.recovery_replayed_batches),
+            ("journal_fsync_total", sm.journal_fsync_total),
+            ("page_split_total", sm.page_split_total),
+            (
+                "mvcc_versions_reclaimed_total",
+                sm.mvcc_versions_reclaimed_total,
+            ),
+            (
+                "journal_segments_reclaimed_total",
+                sm.journal_segments_reclaimed_total,
+            ),
+            (
+                "journal_bytes_reclaimed_total",
+                sm.journal_bytes_reclaimed_total,
+            ),
+            ("journal_retained_bytes", sm.journal_retained_bytes),
+            (
+                "checkpoint_image_incomplete_total",
+                sm.checkpoint_image_incomplete_total,
+            ),
+            ("oldest_snapshot_seq", sm.oldest_snapshot_seq),
+        ] {
+            m.insert(format!("storage.{k}"), v);
+        }
+        for (k, v) in [
+            ("term", self.raft.term()),
+            ("commit_index", self.raft.commit_index()),
+            ("applied_index", self.applied_index),
+            ("log_first_index", self.raft.first_index()),
+            ("log_last_index", self.raft.last_index()),
+            ("snapshot_index", self.raft.snapshot_index()),
+            ("compaction_horizon", self.raft.compaction_horizon()),
+            (
+                "followers_behind_snapshot",
+                self.raft.followers_behind_snapshot,
+            ),
+            ("is_leader", u64::from(self.raft.is_leader())),
+        ] {
+            m.insert(format!("consensus.{k}"), v);
+        }
+        for (k, v) in [
+            ("generation", self.catalog.generation().0),
+            ("applied_index", self.catalog.applied_index()),
+            ("genesis", u64::from(self.catalog.genesis().is_some())),
+            (
+                "grant_active",
+                u64::from(self.catalog.admission_allowed(self.grant_id, self.me)),
+            ),
+        ] {
+            m.insert(format!("catalog.{k}"), v);
+        }
+        for (k, v) in [
+            ("invoke_waiters", self.invoke_waiters.len() as u64),
+            ("admin_waiters", self.admin_waiters.len() as u64),
+            ("resolve_waiters", self.resolve_waiters.len() as u64),
+            ("decided", self.decided.len() as u64),
+            ("retained_results", self.last_exec.len() as u64),
+            ("snapshotted_index", self.snapshot_index),
+            ("entries_since_snapshot", self.entries_since_snapshot),
+            ("authorization_denied", self.authorization_denied),
+            ("failed", u64::from(self.failure.is_some())),
+        ] {
+            m.insert(format!("node.{k}"), v);
+        }
+        m
     }
 
     fn send_out(&mut self) {
@@ -377,17 +470,21 @@ impl NodeCore {
         // Execution belongs to the committed log, not to the leader that admitted it. A new
         // leader must finish every inherited admission even when its client never retries.
         self.propose_pending_decisions()?;
-        let term = self.raft.term();
-        if let Some((t, idx)) = self.bootstrap_pending {
-            if t == term && self.applied_index < idx {
-                return Ok(()); // the previous bootstrap step is still in flight
-            }
+        // Bootstrap decides what to propose by looking at the catalog, so it may only run once
+        // this leader has applied its own log. Right after an election the commit index still
+        // trails: a leader that asked now would see no genesis and propose a second one, every
+        // voter would refuse it, and all of them would fail closed — permanently, because the
+        // duplicate entry is durable. Waiting until the term entry this leader appended on
+        // election has been committed and applied is exactly the condition that makes its state
+        // machine authoritative, and it also covers the previous bootstrap step still being in
+        // flight. Client work cannot starve this: a node that has not bootstrapped is not Ready
+        // and refuses invocations, so nothing else is growing the log meanwhile.
+        if self.applied_index < self.raft.last_index() {
+            return Ok(());
         }
         if self.catalog.genesis().is_none() {
-            let idx = self
-                .raft
+            self.raft
                 .propose(NodeCommand::Genesis(self.cfg.manifest.clone()).encode())?;
-            self.bootstrap_pending = Some((term, idx));
             return Ok(());
         }
         let admin = self.cfg.manifest.bootstrap_admin;
@@ -439,8 +536,7 @@ impl NodeCore {
                         value: grant.to_canon(),
                     }],
                 };
-                let idx = self.raft.propose(NodeCommand::Catalog(cmd).encode())?;
-                self.bootstrap_pending = Some((term, idx));
+                self.raft.propose(NodeCommand::Catalog(cmd).encode())?;
             }
             Some(g) if g.state == GrantState::Staged => {
                 let cmd = CatalogCommand {
@@ -457,8 +553,7 @@ impl NodeCore {
                         to: GrantState::Active,
                     }],
                 };
-                let idx = self.raft.propose(NodeCommand::Catalog(cmd).encode())?;
-                self.bootstrap_pending = Some((term, idx));
+                self.raft.propose(NodeCommand::Catalog(cmd).encode())?;
             }
             Some(_) => {
                 if self
@@ -485,8 +580,44 @@ impl NodeCore {
                             .to_canon(),
                         }],
                     };
-                    let idx = self.raft.propose(NodeCommand::Catalog(cmd).encode())?;
-                    self.bootstrap_pending = Some((term, idx));
+                    self.raft.propose(NodeCommand::Catalog(cmd).encode())?;
+                } else if self
+                    .catalog
+                    .permission_grant(self.client_grant_id)
+                    .is_none()
+                {
+                    let key = CatalogKey::PermissionGrant(self.client_grant_id);
+                    let grant = PermissionGrant {
+                        grant_id: self.client_grant_id,
+                        principal: PrincipalId::derive("dev-local-client"),
+                        tenant: self.tenant,
+                        namespace: self.namespace,
+                        operations: self
+                            .engine
+                            .catalog
+                            .module
+                            .operations
+                            .iter()
+                            .map(|operation| operation.identity)
+                            .collect(),
+                        allow_invoke: true,
+                        allow_resolve: true,
+                        security_policy: self.cfg.manifest.security_policy,
+                        active: true,
+                    };
+                    let cmd = CatalogCommand {
+                        admin_request_id: AdminRequestId::derive(
+                            "bootstrap/dev-local-client-permission",
+                        ),
+                        principal: admin,
+                        expected: vec![(key.clone(), Expected::Absent)],
+                        predicates: vec![],
+                        mutations: vec![Mutation::PutImmutable {
+                            key,
+                            value: grant.to_canon(),
+                        }],
+                    };
+                    self.raft.propose(NodeCommand::Catalog(cmd).encode())?;
                 }
             }
         }
@@ -716,6 +847,7 @@ impl NodeCore {
             }
             NodeCommand::Admit {
                 invoke,
+                principal,
                 admitted_by,
                 catalog_generation,
             } => {
@@ -724,7 +856,12 @@ impl NodeCore {
                 // leader queued it. Recheck in log order on every voter before any new effect.
                 // Previously executed identities only retrieve their original result.
                 if !self.last_exec.contains_key(&key)
-                    && !self.admission_authorized(&invoke, admitted_by, catalog_generation)
+                    && !self.admission_authorized(
+                        &invoke,
+                        principal,
+                        admitted_by,
+                        catalog_generation,
+                    )
                 {
                     if self
                         .invoke_waiters
@@ -908,6 +1045,7 @@ impl NodeCore {
     fn admission_authorized(
         &self,
         inv: &InvokeV1,
+        principal: PrincipalId,
         admitted_by: NodeId,
         generation: CatalogGeneration,
     ) -> bool {
@@ -942,6 +1080,12 @@ impl NodeCore {
             && self
                 .catalog
                 .admission_allowed(route.home_grant, admitted_by)
+            && self.catalog.invoke_allowed(
+                principal,
+                key.tenant_id,
+                key.request_namespace,
+                inv.content.operation,
+            )
     }
 
     fn handle_invoke(&mut self, w: Waiter, payload: Vec<u8>) {
@@ -975,6 +1119,25 @@ impl NodeCore {
             return;
         }
         let key = inv.content.request_key;
+        // Authorization precedes both identity lookup and retained-result replay. Otherwise a
+        // principal that learns another caller's exact request bytes could use Invoke as an
+        // alternate Resolve path after its permission is absent or revoked (SPEC-013 §4/SEC-09).
+        if !self.catalog.invoke_allowed(
+            w.principal,
+            key.tenant_id,
+            key.request_namespace,
+            inv.content.operation,
+        ) {
+            self.authorization_denied += 1;
+            self.reply_client(
+                &w,
+                &refusal(
+                    "AuthorizationDenied",
+                    "principal is not allowed to invoke this tenant namespace and operation".into(),
+                ),
+            );
+            return;
+        }
         if self.decided.contains(&key) {
             let r = self.engine.invoke(&inv);
             self.reply_client(&w, &r);
@@ -985,12 +1148,13 @@ impl NodeCore {
             return;
         }
         // SPEC-011 §5 admission: route + active grant + admitted node
-        if !self.admission_authorized(&inv, self.me, self.catalog.generation()) {
+        if !self.admission_authorized(&inv, w.principal, self.me, self.catalog.generation()) {
+            self.authorization_denied += 1;
             self.reply_client(
                 &w,
                 &refusal(
-                    "AuthorityUnavailable",
-                    "no active route/grant for this namespace at this home".into(),
+                    "AuthorizationDenied",
+                    "principal is not allowed to invoke this tenant namespace and operation".into(),
                 ),
             );
             return;
@@ -1003,6 +1167,7 @@ impl NodeCore {
             }
             return;
         }
+        let principal = w.principal;
         self.invoke_waiters.insert(
             key,
             PendingInvoke {
@@ -1012,6 +1177,7 @@ impl NodeCore {
         );
         let cmd = NodeCommand::Admit {
             invoke: inv,
+            principal,
             admitted_by: self.me,
             catalog_generation: self.catalog.generation(),
         };
@@ -1041,6 +1207,24 @@ impl NodeCore {
                 return;
             }
         };
+        if !self.catalog.resolve_allowed(
+            w.principal,
+            req.request_key.tenant_id,
+            req.request_key.request_namespace,
+        ) {
+            self.authorization_denied += 1;
+            self.reply(
+                &w,
+                MessageKind::ResolveReply,
+                ResolveReplyV1::Unavailable(RefusalV1 {
+                    code: "AuthorizationDenied".into(),
+                    detail: "principal is not allowed to resolve this tenant namespace".into(),
+                    possibly_admitted: false,
+                })
+                .encode(),
+            );
+            return;
+        }
         if !self.raft.is_leader() || self.failure.is_some() {
             let r = self.not_leader();
             let refusal = match r {
@@ -1133,12 +1317,40 @@ impl NodeCore {
                 return;
             }
         };
+        if !self.catalog.admin_allowed(w.principal) {
+            self.authorization_denied += 1;
+            self.reply(
+                &w,
+                MessageKind::AdminReply,
+                AdminReply::Refused {
+                    code: "AuthorizationDenied".into(),
+                    detail: "principal is not allowed to administer this cluster".into(),
+                    leader: self.raft.leader(),
+                }
+                .encode(),
+            );
+            return;
+        }
         match req {
             AdminRequest::Status => {
                 let s = self.status();
                 self.reply(&w, MessageKind::AdminReply, AdminReply::Status(s).encode());
             }
             AdminRequest::Catalog(cmd) => {
+                if cmd.principal != w.principal {
+                    self.reply(
+                        &w,
+                        MessageKind::AdminReply,
+                        AdminReply::Refused {
+                            code: "AuthorizationDenied".into(),
+                            detail: "catalog command principal does not match the connection"
+                                .into(),
+                            leader: self.raft.leader(),
+                        }
+                        .encode(),
+                    );
+                    return;
+                }
                 if !self.raft.is_leader() || self.failure.is_some() {
                     self.reply(
                         &w,
@@ -1304,7 +1516,8 @@ pub fn run_node(cfg: NodeConfig) -> CoreResult<()> {
         let caps = capabilities(cluster, EndpointRole::Node);
         let tx = events_tx.clone();
         let seed = cfg.seed;
-        std::thread::spawn(move || serve(listener, caps, conns, tx, seed));
+        let bootstrap_admin = cfg.manifest.bootstrap_admin;
+        std::thread::spawn(move || serve(listener, caps, bootstrap_admin, conns, tx, seed));
     }
     eprintln!(
         "[{}] listening on {} as {}",
@@ -1338,12 +1551,17 @@ pub fn run_node(cfg: NodeConfig) -> CoreResult<()> {
             }
             Event::Client {
                 conn,
+                principal,
                 kind,
                 stream_id,
                 payload,
                 ..
             } => {
-                let w = Waiter { conn, stream_id };
+                let w = Waiter {
+                    conn,
+                    stream_id,
+                    principal,
+                };
                 match kind {
                     MessageKind::Invoke => core.handle_invoke(w, payload),
                     MessageKind::ResolveRequest => core.handle_resolve(w, payload),

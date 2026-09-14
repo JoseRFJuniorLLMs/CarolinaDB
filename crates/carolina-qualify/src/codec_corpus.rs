@@ -489,6 +489,7 @@ pub fn vectors() -> Vec<CodecVector> {
             "node_command.admit",
             NodeCommand::Admit {
                 invoke: inv.clone(),
+                principal: PrincipalId::derive("dev-local-client"),
                 admitted_by: node,
                 catalog_generation: CatalogGeneration(3),
             },
@@ -538,6 +539,11 @@ pub fn vectors() -> Vec<CodecVector> {
         state_digest: Hash256([5; 32]),
         durable_commit_seq: 9,
         failure: None,
+        metrics: BTreeMap::from([
+            ("consensus.commit_index".to_string(), 10u64),
+            ("engine.committed".to_string(), 7),
+            ("storage.commit_total".to_string(), 9),
+        ]),
     };
     out.push(vec_of("admin_reply.status", None, &AdminReply::Status(st)));
     out.push(vec_of(

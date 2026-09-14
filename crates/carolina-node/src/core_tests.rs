@@ -154,6 +154,16 @@ impl Drop for Cluster {
     }
 }
 
+/// The principal the pinned manifest trusts to administer the cluster (SPEC-013 §4).
+fn bootstrap_admin(cluster: &Cluster) -> PrincipalId {
+    cluster.nodes[0]
+        .as_ref()
+        .unwrap()
+        .cfg
+        .manifest
+        .bootstrap_admin
+}
+
 fn client_reply(receiver: &Receiver<Outbound>) -> (u64, ClientReplyV1) {
     let outbound = receiver.try_recv().expect("expected a client reply");
     assert_eq!(outbound.kind, MessageKind::Reply);
@@ -192,6 +202,7 @@ fn admin_reply(receiver: &Receiver<Outbound>) -> (u64, AdminReply) {
 #[test]
 fn concurrent_admin_retries_match_command_bytes_before_sharing_the_result() {
     let mut cluster = Cluster::new();
+    let admin_principal = bootstrap_admin(&cluster);
     let cmd = close_grant(cluster.node(0), "close-id");
     let mut changed = cmd.clone();
     changed.predicates.clear();
@@ -201,6 +212,7 @@ fn concurrent_admin_retries_match_command_bytes_before_sharing_the_result() {
         Waiter {
             conn: 1,
             stream_id: 1,
+            principal: admin_principal,
         },
         AdminRequest::Catalog(cmd.clone()).encode(),
     );
@@ -209,6 +221,7 @@ fn concurrent_admin_retries_match_command_bytes_before_sharing_the_result() {
         Waiter {
             conn: 1,
             stream_id: 2,
+            principal: admin_principal,
         },
         AdminRequest::Catalog(changed).encode(),
     );
@@ -219,6 +232,7 @@ fn concurrent_admin_retries_match_command_bytes_before_sharing_the_result() {
         Waiter {
             conn: 1,
             stream_id: 3,
+            principal: admin_principal,
         },
         AdminRequest::Catalog(cmd.clone()).encode(),
     );
@@ -241,6 +255,7 @@ fn concurrent_admin_retries_match_command_bytes_before_sharing_the_result() {
 #[test]
 fn seed_retries_share_only_identical_content_and_conflicts_do_not_fail_the_node() {
     let mut cluster = Cluster::new();
+    let admin_principal = bootstrap_admin(&cluster);
     let receiver = cluster.listen(0, 1);
     let seed = AdminRequest::Seed {
         label: "seed-identity".into(),
@@ -265,6 +280,7 @@ fn seed_retries_share_only_identical_content_and_conflicts_do_not_fail_the_node(
         Waiter {
             conn: 1,
             stream_id: 1,
+            principal: admin_principal,
         },
         seed.encode(),
     );
@@ -273,6 +289,7 @@ fn seed_retries_share_only_identical_content_and_conflicts_do_not_fail_the_node(
         Waiter {
             conn: 1,
             stream_id: 2,
+            principal: admin_principal,
         },
         changed.encode(),
     );
@@ -283,6 +300,7 @@ fn seed_retries_share_only_identical_content_and_conflicts_do_not_fail_the_node(
         Waiter {
             conn: 1,
             stream_id: 3,
+            principal: admin_principal,
         },
         seed.encode(),
     );
@@ -301,6 +319,7 @@ fn seed_retries_share_only_identical_content_and_conflicts_do_not_fail_the_node(
         Waiter {
             conn: 1,
             stream_id: 4,
+            principal: admin_principal,
         },
         changed.encode(),
     );
@@ -330,6 +349,7 @@ fn preceding_grant_closure_refuses_queued_admission_and_preserves_final_retries(
         Waiter {
             conn: 1,
             stream_id: 1,
+            principal: PrincipalId::derive("dev-local-client"),
         },
         original.encode(),
     );
@@ -347,6 +367,7 @@ fn preceding_grant_closure_refuses_queued_admission_and_preserves_final_retries(
         Waiter {
             conn: 1,
             stream_id: 2,
+            principal: PrincipalId::derive("dev-local-client"),
         },
         late.encode(),
     );
@@ -373,6 +394,7 @@ fn preceding_grant_closure_refuses_queued_admission_and_preserves_final_retries(
         Waiter {
             conn: 1,
             stream_id: 3,
+            principal: PrincipalId::derive("dev-local-client"),
         },
         original.encode(),
     );
@@ -417,6 +439,7 @@ fn log_admission_checks_node_and_generation_but_allows_unrelated_catalog_progres
             .propose(
                 NodeCommand::Admit {
                     invoke: inv,
+                    principal: PrincipalId::derive("dev-local-client"),
                     admitted_by,
                     catalog_generation,
                 }
@@ -443,6 +466,7 @@ fn log_admission_checks_node_and_generation_but_allows_unrelated_catalog_progres
         .propose(
             NodeCommand::Admit {
                 invoke: valid.clone(),
+                principal: PrincipalId::derive("dev-local-client"),
                 admitted_by: me,
                 catalog_generation: generation,
             }
@@ -476,6 +500,7 @@ fn concurrent_changed_content_is_refused_and_exact_retries_share_one_decision() 
         Waiter {
             conn: 1,
             stream_id: 1,
+            principal: PrincipalId::derive("dev-local-client"),
         },
         inv.encode(),
     );
@@ -484,6 +509,7 @@ fn concurrent_changed_content_is_refused_and_exact_retries_share_one_decision() 
         Waiter {
             conn: 1,
             stream_id: 2,
+            principal: PrincipalId::derive("dev-local-client"),
         },
         changed.encode(),
     );
@@ -495,6 +521,7 @@ fn concurrent_changed_content_is_refused_and_exact_retries_share_one_decision() 
         Waiter {
             conn: 1,
             stream_id: 3,
+            principal: PrincipalId::derive("dev-local-client"),
         },
         inv.encode(),
     );
@@ -517,6 +544,7 @@ fn leadership_loss_retains_the_request_hash_in_unknown_reply() {
         Waiter {
             conn: 1,
             stream_id: 1,
+            principal: PrincipalId::derive("dev-local-client"),
         },
         inv.encode(),
     );
@@ -562,6 +590,7 @@ fn restarted_successor_finishes_inherited_admission_before_resolve_publishes() {
         Waiter {
             conn: 1,
             stream_id: 1,
+            principal: PrincipalId::derive("dev-local-client"),
         },
         inv.encode(),
     );
@@ -572,6 +601,7 @@ fn restarted_successor_finishes_inherited_admission_before_resolve_publishes() {
         .propose(
             NodeCommand::Admit {
                 invoke: changed,
+                principal: PrincipalId::derive("dev-local-client"),
                 admitted_by: leader.me,
                 catalog_generation: leader.catalog.generation(),
             }
@@ -599,6 +629,7 @@ fn restarted_successor_finishes_inherited_admission_before_resolve_publishes() {
         Waiter {
             conn: 1,
             stream_id: 1,
+            principal: PrincipalId::derive("dev-local-client"),
         },
         req.encode(),
     );
@@ -615,6 +646,7 @@ fn restarted_successor_finishes_inherited_admission_before_resolve_publishes() {
         Waiter {
             conn: 1,
             stream_id: 2,
+            principal: PrincipalId::derive("dev-local-client"),
         },
         req.encode(),
     );
@@ -665,6 +697,7 @@ fn applied_state_is_snapshotted_and_the_leader_compacts_the_prefix() {
             Waiter {
                 conn: 100 + i as u64,
                 stream_id: 1,
+                principal: PrincipalId::derive("dev-local-client"),
             },
             inv.encode(),
         );
@@ -718,4 +751,158 @@ fn applied_state_is_snapshotted_and_the_leader_compacts_the_prefix() {
         "the restarted voter resumes at the image, not at index 1"
     );
     cluster.nodes[0] = Some(reopened);
+}
+
+/// SPEC-008 §19 / SPEC-001 §63: a node publishes what it counts, and the counters distinguish the
+/// cases an operator has to tell apart — committed work, refused authorization, the compacted log
+/// base and the applied frontier. An unauthorized principal must move the denial counter and
+/// nothing else.
+#[test]
+fn node_status_publishes_operational_counters() {
+    let mut cluster = Cluster::new();
+    let inv = cluster.invoke("metrics-1", 1);
+    let receiver = cluster.listen(0, 70);
+    cluster.node(0).handle_invoke(
+        Waiter {
+            conn: 70,
+            stream_id: 1,
+            principal: PrincipalId::derive("dev-local-client"),
+        },
+        inv.encode(),
+    );
+    cluster.pump(40, true);
+    assert!(matches!(
+        client_reply(&receiver).1,
+        ClientReplyV1::Committed(_)
+    ));
+
+    let before = cluster.node(0).status().metrics;
+    assert!(before["engine.committed"] >= 1, "{before:?}");
+    assert_eq!(before["engine.identity_mismatch"], 0);
+    assert_eq!(before["node.authorization_denied"], 0);
+    assert_eq!(before["consensus.is_leader"], 1);
+    assert!(before["consensus.applied_index"] >= before["consensus.snapshot_index"]);
+    assert!(before["storage.commit_total"] >= 1);
+    assert_eq!(before["catalog.genesis"], 1);
+    assert_eq!(before["catalog.grant_active"], 1);
+
+    // An unknown principal is refused, and only the denial counter moves.
+    let stranger = cluster.invoke("metrics-2", 1);
+    let receiver = cluster.listen(0, 71);
+    cluster.node(0).handle_invoke(
+        Waiter {
+            conn: 71,
+            stream_id: 1,
+            principal: PrincipalId::derive("nobody"),
+        },
+        stranger.encode(),
+    );
+    cluster.pump(20, true);
+    let (_, reply) = client_reply(&receiver);
+    assert!(
+        matches!(&reply, ClientReplyV1::Unavailable(r) if r.code == "AuthorizationDenied"),
+        "{reply:?}"
+    );
+    let after = cluster.node(0).status().metrics;
+    assert_eq!(after["node.authorization_denied"], 1);
+    assert_eq!(
+        after["engine.invocations"], before["engine.invocations"],
+        "a denied request must never reach the engine"
+    );
+
+    // A retained result is not an authorization bypass: knowing the exact committed request
+    // bytes must not disclose its receipt to a different principal through Invoke.
+    let receiver = cluster.listen(0, 72);
+    cluster.node(0).handle_invoke(
+        Waiter {
+            conn: 72,
+            stream_id: 1,
+            principal: PrincipalId::derive("nobody"),
+        },
+        inv.encode(),
+    );
+    let (_, replay) = client_reply(&receiver);
+    assert!(
+        matches!(&replay, ClientReplyV1::Unavailable(r) if r.code == "AuthorizationDenied"),
+        "{replay:?}"
+    );
+    let after_replay = cluster.node(0).status().metrics;
+    assert_eq!(after_replay["node.authorization_denied"], 2);
+    assert_eq!(
+        after_replay["engine.invocations"], before["engine.invocations"],
+        "a denied retained-result replay must never reach the engine"
+    );
+
+    // the status survives the codec the admin reply uses
+    let status = cluster.node(0).status();
+    let bytes = AdminReply::Status(status.clone()).encode();
+    match AdminReply::decode(&bytes, &Limits::v1()).unwrap() {
+        AdminReply::Status(back) => assert_eq!(back.metrics, status.metrics),
+        other => panic!("expected a status reply: {other:?}"),
+    }
+}
+
+/// SPEC-008 §5 / SPEC-011 §7: a cold restart of the **whole** cluster must not bootstrap twice.
+///
+/// A voter that restarts before its first snapshot rebuilds the catalog by replaying the log, so
+/// it starts with no genesis. If the leader elected out of that restart asks the catalog what to
+/// bootstrap before it has applied its own log, it sees an empty catalog and proposes a second
+/// genesis; every voter then refuses that entry and fails closed — permanently, because the
+/// duplicate is durable and every later restart replays it. The process campaign restarts one
+/// voter at a time, which a live majority carries and catches up as a follower, so it cannot
+/// reach this case.
+///
+/// The test build snapshots every four entries, so the pre-snapshot window is reached by removing
+/// the image; the assertion that nothing was compacted first is what makes that equivalent.
+#[test]
+fn a_cold_restart_of_every_voter_does_not_bootstrap_twice() {
+    let mut cluster = Cluster::new();
+    let generation = cluster.node(0).catalog.generation();
+    let log_end = cluster.node(0).raft.last_index();
+
+    let cfgs: Vec<NodeConfig> = (0..3).map(|i| cluster.node(i).cfg.clone()).collect();
+    for i in 0..3 {
+        assert_eq!(
+            cluster.node(i).raft.snapshot_index(),
+            0,
+            "the whole log must still be present for the image to be removable"
+        );
+        let image = cluster.node(i).snapshot_dir.join("node.snapshot");
+        cluster.nodes[i] = None;
+        let _ = std::fs::remove_file(&image);
+    }
+
+    for (i, cfg) in cfgs.into_iter().enumerate() {
+        let node = NodeCore::open(cfg, Arc::new(Connections::default()), BTreeMap::new()).unwrap();
+        assert!(
+            node.catalog.genesis().is_none(),
+            "a voter with no image starts with an empty catalog; that is what makes an \
+             un-caught-up leader dangerous"
+        );
+        assert_eq!(node.applied_index, 0);
+        cluster.nodes[i] = Some(node);
+    }
+
+    // pump() asserts on every round that no node has failed closed
+    cluster.elect(1);
+    cluster.pump(80, true);
+
+    for i in 0..3 {
+        assert!(cluster.node(i).failure.is_none());
+        assert!(
+            cluster.node(i).catalog.genesis().is_some(),
+            "voter {i} must replay the genesis it already had"
+        );
+        assert_eq!(
+            cluster.node(i).catalog.generation(),
+            generation,
+            "voter {i}: bootstrap must not run a second time"
+        );
+    }
+    assert_eq!(
+        cluster.node(1).raft.last_index(),
+        log_end + 1,
+        "the only new entry is the term entry the election appended"
+    );
+    assert!(cluster.nodes.iter().flatten().all(NodeCore::ready));
 }

@@ -467,6 +467,73 @@ pub fn three_process_c5(binary: &Path, root: &Path) -> Result<C5Summary, String>
     summary
         .checks
         .push("C5-009: a minority survivor cannot admit".into());
+
+    // The whole cluster goes down and comes back. A voter that restarts before its first snapshot
+    // rebuilds its catalog by replaying the log, so the leader elected out of a cold start sees an
+    // empty catalog until it has applied its own log; if it bootstrapped on that view, a second
+    // genesis would enter the durable log and every voter would fail closed for good. Restarting
+    // one voter at a time never reaches this, because a live majority carries it as a follower.
+    procs[l].kill();
+    std::thread::sleep(Duration::from_millis(500));
+    for p in procs.iter_mut() {
+        p.start()?;
+    }
+    wait_leader(&procs, cluster_id, Duration::from_secs(90))
+        .ok_or("cold restart: the cluster did not elect a leader again")?;
+    // A voter that has not yet applied genesis refuses every admin request, `Status` included, so
+    // the state of a recovering cluster has to be polled until it converges rather than sampled
+    // once. A voter that fails closed after genesis still answers and reports it, which is why
+    // this loop can distinguish "still catching up" from "came back wrong".
+    let start = Instant::now();
+    let mut pending: Vec<usize> = (0..procs.len()).collect();
+    while start.elapsed() < Duration::from_secs(90) && !pending.is_empty() {
+        pending.retain(|i| {
+            let p = &procs[*i];
+            let Some(mut c) = connect(p, cluster_id, EndpointRole::Admin) else {
+                return true;
+            };
+            match c.status() {
+                Ok(s) => {
+                    s.failure.is_some()
+                        || s.catalog_generation != target.catalog_generation
+                        || s.state_digest != target.state_digest
+                }
+                Err(_) => true,
+            }
+        });
+        if !pending.is_empty() {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    if let Some(i) = pending.first() {
+        let mut detail = format!("cold restart: {} did not come back", procs[*i].name);
+        if let Some(mut c) = connect(&procs[*i], cluster_id, EndpointRole::Admin) {
+            if let Ok(s) = c.status() {
+                detail = format!(
+                    "cold restart: {}: failure={:?} generation={:?} (want {:?}) digest_matches={}",
+                    procs[*i].name,
+                    s.failure,
+                    s.catalog_generation,
+                    target.catalog_generation,
+                    s.state_digest == target.state_digest
+                );
+            }
+        }
+        return Err(detail);
+    }
+    match resolve_via_leader(&procs, cluster_id, &inv1, Duration::from_secs(60))? {
+        ResolveReplyV1::Terminal(b) => ensure!(
+            committed(&b)?.encode() == r1.encode(),
+            "cold restart: resolve returned different bytes"
+        ),
+        other => return Err(format!("cold restart: resolve: {other:?}")),
+    }
+    summary.metrics.insert("cold_restarts".into(), 1);
+    summary.checks.push(
+        "cold restart: every voter down and back; no second bootstrap, one state digest, the original receipt still resolves"
+            .into(),
+    );
+
     drop(procs);
     let _ = std::fs::remove_dir_all(root);
     Ok(summary)

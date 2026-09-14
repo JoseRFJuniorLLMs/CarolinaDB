@@ -1,5 +1,7 @@
 //! Log commands and administrative messages of the node.
 
+use std::collections::BTreeMap;
+
 use carolina_catalog::{BootstrapManifest, CatalogCommand, CatalogCommit};
 use carolina_core::canon::{CanonValue, Canonical};
 use carolina_core::error::{CoreError, CoreResult, ErrorCode};
@@ -21,6 +23,7 @@ pub enum NodeCommand {
     /// Ordered admission of one client request (SPEC-008 §8 steps 3–4): the execution slot.
     Admit {
         invoke: InvokeV1,
+        principal: PrincipalId,
         admitted_by: NodeId,
         catalog_generation: CatalogGeneration,
     },
@@ -87,6 +90,7 @@ impl Canonical for NodeCommand {
                 .build(),
             NodeCommand::Admit {
                 invoke,
+                principal,
                 admitted_by,
                 catalog_generation,
             } => CanonValue::obj()
@@ -94,6 +98,7 @@ impl Canonical for NodeCommand {
                 .fc("catalog_generation", catalog_generation)
                 .fc("invoke", invoke)
                 .fstr("kind", "Admit")
+                .fc("principal", principal)
                 .build(),
             NodeCommand::Decision {
                 request_key,
@@ -127,6 +132,7 @@ impl Canonical for NodeCommand {
             "Catalog" => NodeCommand::Catalog(CatalogCommand::from_canon(v.field("command")?)?),
             "Admit" => NodeCommand::Admit {
                 invoke: InvokeV1::from_canon(v.field("invoke")?)?,
+                principal: PrincipalId::from_canon(v.field("principal")?)?,
                 admitted_by: NodeId::from_canon(v.field("admitted_by")?)?,
                 catalog_generation: CatalogGeneration::from_canon(v.field("catalog_generation")?)?,
             },
@@ -218,6 +224,9 @@ pub struct NodeStatus {
     pub state_digest: Hash256,
     pub durable_commit_seq: u64,
     pub failure: Option<String>,
+    /// Operational counters, `area.name -> value` (SPEC-001 §63, SPEC-008 §19). Names are stable;
+    /// a missing name means the build does not produce it, never that the value is zero.
+    pub metrics: BTreeMap<String, u64>,
 }
 
 impl Canonical for NodeStatus {
@@ -237,6 +246,15 @@ impl Canonical for NodeStatus {
             .fbool("genesis", self.genesis)
             .fbool("grant_active", self.grant_active)
             .fopt("leader", &self.leader)
+            .f(
+                "metrics",
+                CanonValue::Object(
+                    self.metrics
+                        .iter()
+                        .map(|(k, v)| (k.clone(), CanonValue::uint(*v)))
+                        .collect(),
+                ),
+            )
             .fc("node", &self.node)
             .fstr("readiness", &self.readiness)
             .fstr("role", &self.role)
@@ -245,7 +263,14 @@ impl Canonical for NodeStatus {
             .build()
     }
     fn from_canon(v: &CanonValue) -> CoreResult<Self> {
+        let mut metrics = BTreeMap::new();
+        if let CanonValue::Object(o) = v.field("metrics")? {
+            for (k, val) in o {
+                metrics.insert(k.clone(), val.as_u64()?);
+            }
+        }
         Ok(NodeStatus {
+            metrics,
             node: NodeId::from_canon(v.field("node")?)?,
             readiness: v.field("readiness")?.as_str()?.to_string(),
             role: v.field("role")?.as_str()?.to_string(),

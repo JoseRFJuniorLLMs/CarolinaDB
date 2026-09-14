@@ -928,7 +928,13 @@ pub fn run_campaign(cfg: &CampaignConfig) -> Result<CampaignReport, ConfigError>
     ));
     checks.push(CheckResult::not_run(
         "QI-SECURITY",
-        "SPEC-013 mTLS/authorization not implemented; DEV_LOCAL profile only",
+        "SPEC-013 mTLS, credential authentication and cryptographic profiles not implemented; authorization is reported separately by QI-AUTHZ; DEV_LOCAL profile only",
+    ));
+    run_check!(cfg, checks, "QI-AUTHZ", CheckResult::from_result(
+        "QI-AUTHZ",
+        "catalog principal enforcement, exact tenant/namespace/operation grants, current authorization on resolve and atomic denial of privileged mutations",
+        carolina_catalog::authorization_campaign(),
+        |passed| format!("{} authorization schedules held: {}", passed.len(), passed.join(" | ")),
     ));
     run_check!(cfg, checks, "QI-CATALOG", CheckResult::from_result(
         "QI-CATALOG",
@@ -1044,13 +1050,19 @@ pub fn run_campaign(cfg: &CampaignConfig) -> Result<CampaignReport, ConfigError>
         ),
         derive_gate(
             "QI",
-            &["QI-CODEC-CORPUS", "QI-SECURITY", "QI-CATALOG"],
+            &["QI-CODEC-CORPUS", "QI-SECURITY", "QI-AUTHZ", "QI-CATALOG"],
             &checks,
         ),
         derive_gate("FM", &["FM-1", "FM-2", "FM-3"], &checks),
         derive_gate(
             "Q3-C5",
-            &["QI-CATALOG", "Q3-CONSENSUS-SIM", "Q3-C5-PROCESS", "FM-2"],
+            &[
+                "QI-AUTHZ",
+                "QI-CATALOG",
+                "Q3-CONSENSUS-SIM",
+                "Q3-C5-PROCESS",
+                "FM-2",
+            ],
             &checks,
         ),
         derive_gate("Q3", &["Q3-PROTOCOLS", "FM-1", "FM-2"], &checks),

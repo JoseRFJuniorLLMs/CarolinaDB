@@ -558,3 +558,119 @@ fn opening_without_a_matching_local_grant_is_refused() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&bare);
 }
+
+/// SPEC-001 §63: the request path counts what it did by outcome, and the split follows the
+/// contract — a business rejection is a final answer, an admission refusal ran nothing, an
+/// identity mismatch is neither, and an expired identity is its own case. One "errors" number
+/// would hide exactly the distinction the system exists to preserve.
+#[test]
+fn engine_counts_outcomes_by_contract_meaning() {
+    let dir = temp_dir("rt-metrics");
+    let catalog = catalog();
+    let mut e = LocalEngine::create(&dir, catalog.clone(), opts(Arc::new(NoFaults))).unwrap();
+    e.load_rows(
+        "Item",
+        "Item",
+        &[(
+            Value::Uuid(ITEM),
+            vec![
+                ("id", Value::Uuid(ITEM)),
+                ("available", Value::I64(5)),
+                ("reserved", Value::I64(0)),
+                ("total", Value::I64(5)),
+            ],
+        )],
+    )
+    .unwrap();
+
+    let reserve = |id: &str, q: i64, rid: u8| {
+        make_invoke(
+            &catalog,
+            "tenant",
+            id,
+            "reserve",
+            vec![Value::Uuid(ITEM), Value::I64(q), Value::Uuid([rid; 16])],
+        )
+        .unwrap()
+    };
+    // one commit, one business rejection (more than available), one identity mismatch
+    let ok = reserve("m-1", 2, 1);
+    assert!(matches!(e.invoke(&ok), ClientReplyV1::Committed(_)));
+    assert!(matches!(
+        e.invoke(&reserve("m-2", 99, 2)),
+        ClientReplyV1::Rejected(_)
+    ));
+    let changed = reserve("m-1", 3, 3);
+    assert!(matches!(
+        e.invoke(&changed),
+        ClientReplyV1::RequestIdentityMismatch
+    ));
+    // nothing has been replayed yet: every outcome so far came from a real execution
+    assert_eq!(e.metrics().retained_replays, 0);
+    // a retry of the committed request is another invocation with the same outcome, but it is
+    // served from the retained receipt rather than executed again
+    let first = e.invoke(&ok);
+    let retry = e.invoke(&ok);
+    assert!(matches!(first, ClientReplyV1::Committed(_)));
+    assert_eq!(
+        first.encode(),
+        retry.encode(),
+        "retry must be byte-identical"
+    );
+
+    let m = e.metrics().clone();
+    assert_eq!(m.invocations, 5);
+    assert_eq!(m.committed, 3);
+    assert_eq!(m.rejected, 1);
+    assert_eq!(m.identity_mismatch, 1);
+    assert_eq!(m.refused, 0, "nothing was refused before binding here");
+    assert_eq!(m.outcome_unknown, 0);
+    assert_eq!(
+        m.retained_replays, 2,
+        "both retries were served from the retained result"
+    );
+    assert_eq!(
+        m.committed + m.rejected - m.retained_replays,
+        2,
+        "exactly two requests were really executed: the commit and the rejection"
+    );
+
+    // resolve: one terminal, one absent
+    let terminal = e.resolve(&ResolveRequestV1 {
+        request_key: ok.content.request_key,
+        expected_request_hash: ok.request_hash,
+    });
+    assert!(matches!(terminal, ResolveReplyV1::Terminal(_)));
+    let never = reserve("never-sent", 1, 9);
+    let absent = e.resolve(&ResolveRequestV1 {
+        request_key: never.content.request_key,
+        expected_request_hash: never.request_hash,
+    });
+    assert!(matches!(absent, ResolveReplyV1::AbsentAtBarrier { .. }));
+    assert_eq!(e.metrics().resolves, 2);
+    assert_eq!(e.metrics().resolved_terminal, 1);
+    assert_eq!(e.metrics().resolved_absent, 1);
+
+    // eviction and retirement are counted, and the evicted identity is expired afterwards
+    e.evict_result(&ok.content.request_key).unwrap();
+    assert!(matches!(
+        e.invoke(&ok),
+        ClientReplyV1::ResultExpired(_) | ClientReplyV1::IdentityExpired { .. }
+    ));
+    assert_eq!(e.metrics().results_evicted, 1);
+    assert_eq!(e.metrics().identity_expired, 1);
+    e.retire_namespace(
+        ok.content.request_key.tenant_id,
+        ok.content.request_key.request_namespace,
+        "test",
+    )
+    .unwrap();
+    assert_eq!(e.metrics().namespaces_retired, 1);
+
+    // the map is the shape the node publishes
+    let map = e.metrics().to_map("engine");
+    assert_eq!(map["engine.committed"], 3);
+    assert_eq!(map["engine.invocations"], 6);
+    assert_eq!(map["engine.retained_replays"], 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -18,7 +18,7 @@ use std::time::Duration;
 use carolina_consensus::Envelope;
 use carolina_core::canon::Canonical;
 use carolina_core::error::{CoreError, CoreResult, ErrorCode};
-use carolina_core::ids::ClusterId;
+use carolina_core::ids::{ClusterId, PrincipalId};
 use carolina_core::limits::Limits;
 use carolina_wire::envelope::{encode_frame, FrameReader, MessageKind};
 use carolina_wire::negotiation::{EndpointRole, HelloAckV1, HelloV1, LocalCapabilities};
@@ -49,6 +49,10 @@ pub enum Event {
     Client {
         conn: ConnId,
         role: EndpointRole,
+        /// Authorization identity supplied by the active security profile. DEV_LOCAL maps its
+        /// trusted loopback endpoint roles to pinned fixture principals; mTLS will replace this
+        /// profile mapping with certificate-bound identities.
+        principal: PrincipalId,
         kind: MessageKind,
         stream_id: u64,
         payload: Vec<u8>,
@@ -250,6 +254,7 @@ fn role_allows(role: EndpointRole, kind: MessageKind) -> bool {
 pub fn serve(
     listener: TcpListener,
     caps: LocalCapabilities,
+    bootstrap_admin: PrincipalId,
     conns: Arc<Connections>,
     events: Sender<Event>,
     seed: u64,
@@ -284,6 +289,11 @@ pub fn serve(
                 Ok(x) => x,
                 Err(_) => return,
             };
+            let principal = match role {
+                EndpointRole::Admin => bootstrap_admin,
+                EndpointRole::Client => PrincipalId::derive("dev-local-client"),
+                EndpointRole::Node => PrincipalId::derive("dev-local-node"),
+            };
             let (tx, rx) = channel::<Outbound>();
             conns.register(conn, tx);
             let mut writer = writer;
@@ -309,6 +319,7 @@ pub fn serve(
                     Event::Client {
                         conn,
                         role,
+                        principal,
                         kind,
                         stream_id: frame.header.stream_id,
                         payload: frame.payload,
